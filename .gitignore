@@ -1,0 +1,23 @@
+# Node / Vite build ignore
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# C++ Build ignores
+bin/
+*.obj
+*.exe
+*.o
+
+# Log files
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Editor / System ignores
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
