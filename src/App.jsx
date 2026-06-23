@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { questionsData } from './questions';
 import confetti from 'canvas-confetti';
+import Paho from 'paho-mqtt';
 
 // dicebear avatars seeds
 const AVATAR_SEEDS = ['Cplusplus', 'Compiler', 'Algorithm', 'Pointer', 'Recursion', 'Matrix', 'Binary', 'Lambda'];
@@ -70,29 +71,35 @@ export default function App() {
   const [cheatReason, setCheatReason] = useState('');
   const [cheatLogs, setCheatLogs] = useState([]); // List of alerts displayed in the side panel
 
+  // Onboarding & Confirmation Modal States (Basic Features Review)
+  const [showHelpModal, setShowHelpModal] = useState(false);
+  const [showQuitConfirm, setShowQuitConfirm] = useState(false);
+  const [showResetConfirm, setShowResetConfirm] = useState(false);
+
   // Refs
   const socketRef = useRef(null);
   const broadcastChannelRef = useRef(null);
   const aiTimersRef = useRef([]);
   const questionTimerRef = useRef(null);
+  const mqttClientRef = useRef(null);
 
   // State refs for event handlers to access current values
   const stateRef = useRef({
     score, streak, difficulty, currentRound, cheatCount, isDisqualified, gameState,
     antiCheatEnabled, antiCheatPenalties, ruleTabSwitch, ruleMouseLeave, ruleInspectBlock, ruleSpeedRun,
-    hasAnswered
+    hasAnswered, showQuitConfirm, showHelpModal
   });
 
   useEffect(() => {
     stateRef.current = {
       score, streak, difficulty, currentRound, cheatCount, isDisqualified, gameState,
       antiCheatEnabled, antiCheatPenalties, ruleTabSwitch, ruleMouseLeave, ruleInspectBlock, ruleSpeedRun,
-      hasAnswered
+      hasAnswered, showQuitConfirm, showHelpModal
     };
   }, [
     score, streak, difficulty, currentRound, cheatCount, isDisqualified, gameState,
     antiCheatEnabled, antiCheatPenalties, ruleTabSwitch, ruleMouseLeave, ruleInspectBlock, ruleSpeedRun,
-    hasAnswered
+    hasAnswered, showQuitConfirm, showHelpModal
   ]);
 
   // Load username & stats history from LocalStorage
@@ -264,27 +271,143 @@ export default function App() {
     }
 
     setConnectionStatus('Connecting...');
-    let wsUrl = '';
 
     if (connectionMode === 'internet') {
-      // Free public PieSocket channel demo broker routing by roomCode channel
-      wsUrl = `wss://demo.piesocket.com/v3/${roomCode}?api_key=VCXCEuvhGcBDP7XhiJJUDvR1e1D3eiVjgZ9VRiaV&notify_self=0`;
-    } else if (connectionMode === 'local') {
-      // Local node WS server
-      wsUrl = `ws://localhost:8080`;
+      // Connect to the public secure EMQX WSS Broker (zero configuration, works over HTTPS)
+      const clientId = `quiz-${roomCode}-${Math.random().toString(36).substring(2, 9)}`;
+      const client = new Paho.Client('broker.emqx.io', 8084, '/mqtt', clientId);
+      mqttClientRef.current = client;
+
+      client.onConnectionLost = (responseObject) => {
+        if (responseObject.errorCode !== 0) {
+          console.warn('[MQTT CONNECTION LOST]', responseObject.errorMessage);
+          setConnectionStatus('Disconnected');
+          setConnectionMode('fallback');
+        }
+      };
+
+      client.onMessageArrived = (message) => {
+        try {
+          const data = JSON.parse(message.payloadString);
+          if (data.code !== roomCode) return;
+          if (data.sender === username) return; // Prevent loop back to self
+          handleIncomingMessage(data);
+        } catch (err) {
+          console.warn('Error parsing incoming MQTT payload:', err);
+        }
+      };
+
+      client.connect({
+        useSSL: true,
+        timeout: 10,
+        keepAliveInterval: 60,
+        cleanSession: true,
+        onSuccess: () => {
+          setConnectionStatus('Connected (Internet)');
+          client.subscribe(`quiz/room/${roomCode}`);
+
+          // Broadcast Join Lobby immediately
+          const joinMsg = {
+            code: roomCode,
+            type: 'JOIN_LOBBY',
+            sender: username,
+            payload: {
+              username,
+              avatar: selectedAvatar,
+              score: 0,
+              streak: 0,
+              difficulty: 'easy',
+              round: 1,
+              cheatCount: 0,
+              isDisqualified: false,
+              status: 'ready'
+            }
+          };
+          const pahoMsg = new Paho.Message(JSON.stringify(joinMsg));
+          pahoMsg.destinationName = `quiz/room/${roomCode}`;
+          client.send(pahoMsg);
+        },
+        onFailure: (err) => {
+          console.error('[MQTT CONNECTION FAILED]', err);
+          setConnectionStatus('Disconnected');
+          setConnectionMode('fallback');
+        }
+      });
+
+      return () => {
+        try {
+          if (client && client.isConnected()) {
+            client.disconnect();
+          }
+        } catch (e) {}
+      };
+    }
+
+    if (connectionMode === 'local') {
+      const wsUrl = `ws://localhost:8080`;
+      try {
+        const ws = new WebSocket(wsUrl);
+        socketRef.current = ws;
+
+        ws.onopen = () => {
+          setConnectionStatus('Connected (Local Host)');
+          ws.send(JSON.stringify({
+            code: roomCode,
+            type: 'JOIN_LOBBY',
+            sender: username,
+            payload: {
+              username,
+              avatar: selectedAvatar,
+              score: 0,
+              streak: 0,
+              difficulty: 'easy',
+              round: 1,
+              cheatCount: 0,
+              isDisqualified: false,
+              status: 'ready'
+            }
+          }));
+        };
+
+        ws.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            handleIncomingMessage(data);
+          } catch (err) {
+            console.warn('Error parsing incoming WS message:', err);
+          }
+        };
+
+        ws.onerror = (e) => {
+          console.warn('[WS ERROR] Socket encountered error:', e);
+        };
+
+        ws.onclose = () => {
+          setConnectionStatus('Disconnected');
+          setConnectionMode('internet');
+        };
+      } catch (e) {
+        console.warn('Local WS setup failed, falling back to Internet...', e);
+        setConnectionMode('internet');
+      }
+
+      return () => {
+        if (socketRef.current) {
+          socketRef.current.close();
+        }
+      };
     }
 
     if (connectionMode === 'fallback') {
-      // BroadcastChannel Local Tab Sync fallback
       setConnectionStatus('Connected (Local Multi-Tab)');
       broadcastChannelRef.current = new BroadcastChannel(`quiz_room_${roomCode}`);
       broadcastChannelRef.current.onmessage = (event) => {
         handleIncomingMessage(event.data);
       };
       
-      // Auto-broadcast joining
       setTimeout(() => {
         broadcastChannelRef.current.postMessage({
+          code: roomCode,
           sender: username,
           type: 'JOIN_LOBBY',
           payload: {
@@ -300,84 +423,28 @@ export default function App() {
           }
         });
       }, 500);
-      return;
-    }
 
-    try {
-      const ws = new WebSocket(wsUrl);
-      socketRef.current = ws;
-
-      ws.onopen = () => {
-        setConnectionStatus(connectionMode === 'internet' ? 'Connected (Internet)' : 'Connected (Local Host)');
-        
-        // Notify other clients that we have joined the room
-        ws.send(JSON.stringify({
-          code: roomCode,
-          type: 'JOIN_LOBBY',
-          sender: username,
-          payload: {
-            username,
-            avatar: selectedAvatar,
-            score: 0,
-            streak: 0,
-            difficulty: 'easy',
-            round: 1,
-            cheatCount: 0,
-            isDisqualified: false,
-            status: 'ready'
-          }
-        }));
-      };
-
-      ws.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          // For PieSocket, we filter messages by room code inside the payload
-          if (connectionMode === 'internet' && data.code !== roomCode) return;
-          handleIncomingMessage(data);
-        } catch (err) {
-          console.warn('Error parsing incoming WS message:', err);
+      return () => {
+        if (broadcastChannelRef.current) {
+          broadcastChannelRef.current.close();
         }
       };
-
-      ws.onerror = (e) => {
-        console.warn('[WS ERROR] Socket encountered error:', e);
-      };
-
-      ws.onclose = () => {
-        setConnectionStatus('Disconnected');
-        // Gracefully attempt local fallback if connection died
-        if (connectionMode === 'local') {
-          console.log('[FALLBACK] Local WS offline, checking Internet Mode or BroadcastChannel...');
-          setConnectionMode('internet');
-        } else if (connectionMode === 'internet') {
-          console.log('[FALLBACK] Internet WS offline, checking BroadcastChannel...');
-          setConnectionMode('fallback');
-        }
-      };
-    } catch (e) {
-      console.warn('Connection failed, loading fallback...', e);
-      setConnectionMode('fallback');
     }
+  }, [isMultiplayer, roomCode, connectionMode, username, selectedAvatar]);
 
-    return () => {
-      if (socketRef.current) {
-        socketRef.current.close();
-      }
-      if (broadcastChannelRef.current) {
-        broadcastChannelRef.current.close();
-      }
-    };
-  }, [isMultiplayer, roomCode, connectionMode]);
-
-  // Unified Sending Interface (decides whether to send via WS or BroadcastChannel)
+  // Unified Sending Interface (decides whether to send via WS, Paho MQTT, or BroadcastChannel)
   const sendSocketOrBroadcast = (messageObj) => {
-    // Add Room Code identifier
     const fullMsg = { ...messageObj, code: roomCode };
 
     if (connectionMode === 'fallback') {
       if (broadcastChannelRef.current) {
         broadcastChannelRef.current.postMessage(fullMsg);
+      }
+    } else if (connectionMode === 'internet') {
+      if (mqttClientRef.current && mqttClientRef.current.isConnected()) {
+        const pahoMsg = new Paho.Message(JSON.stringify(fullMsg));
+        pahoMsg.destinationName = `quiz/room/${roomCode}`;
+        mqttClientRef.current.send(pahoMsg);
       }
     } else {
       if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
@@ -1045,11 +1112,167 @@ export default function App() {
           </div>
         </div>
 
-        {/* LOGO */}
-        <div style={{ textAlign: 'center', marginBottom: '20px' }}>
+        {/* LOGO (Acts as Return to Home link) */}
+        <div 
+          style={{ textAlign: 'center', marginBottom: '20px', cursor: gameState !== 'login' ? 'pointer' : 'default' }}
+          onClick={() => {
+            if (gameState === 'login') return;
+            if (gameState === 'playing' && !isDisqualified) {
+              setShowQuitConfirm(true);
+            } else {
+              if (gameState === 'lobby') {
+                handleLeaveLobby();
+              } else {
+                setGameState('dashboard');
+              }
+            }
+          }}
+        >
           <h1>ADAPTIVE QUIZ ARENA</h1>
-          <p className="subtitle">C++ Concept &amp; Memory Integrity Platform</p>
+          <p className="subtitle" style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+            C++ Concept &amp; Memory Integrity Platform
+            {gameState !== 'login' && <span style={{ fontSize: '0.7rem', opacity: 0.6 }}>(Click Arena Title to go Home)</span>}
+          </p>
         </div>
+
+        {/* HELP / HOW TO PLAY MODAL OVERLAY */}
+        {showHelpModal && (
+          <div style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            background: 'rgba(2, 6, 23, 0.95)',
+            zIndex: 1000,
+            borderRadius: '24px',
+            display: 'flex',
+            flexDirection: 'column',
+            padding: '30px',
+            backdropFilter: 'blur(12px)',
+            animation: 'slideIn 0.3s',
+            overflowY: 'auto'
+          }}>
+            <h2 style={{ color: 'var(--color-primary)', fontWeight: 800, fontSize: '1.4rem', marginBottom: '15px', textAlign: 'center' }}>
+              ❓ HOW TO PLAY &amp; ARENA RULES
+            </h2>
+            <div style={{ fontSize: '0.85rem', lineHeight: 1.5, display: 'flex', flexDirection: 'column', gap: '14px', flexGrow: 1, textAlign: 'left', paddingRight: '5px' }}>
+              <div>
+                <strong>1. Adaptive Difficulty Engine:</strong>
+                <p style={{ color: 'var(--color-text-muted)', marginTop: '2px' }}>Your starting difficulty is EASY. Answering correctly raises the level (Easy → Medium → Hard). Answering incorrectly lowers the level (Hard → Medium → Easy).</p>
+              </div>
+              <div>
+                <strong>2. Points and Combos:</strong>
+                <p style={{ color: 'var(--color-text-muted)', marginTop: '2px' }}>Base Points: Easy = 10 pts | Medium = 30 pts | Hard = 50 pts. Consecutive correct answers stack a Streak Combo multiplier (+5 pts per streak level added to base points!). Incorrect answers break the streak.</p>
+              </div>
+              <div>
+                <strong>3. Strict Anti-Cheat Protocols:</strong>
+                <p style={{ color: 'var(--color-text-muted)', marginTop: '2px' }}>If active, the system detects tab switching, cursor departures from the viewport, DevTools activations (Inspect or F12), and right-clicks. Each warning deducts points. A 3rd infraction triggers automatic disqualification (score locked to 0).</p>
+              </div>
+              <div>
+                <strong>4. Speed Run Mode:</strong>
+                <p style={{ color: 'var(--color-text-muted)', marginTop: '2px' }}>When enabled, you have exactly 15 seconds per question. Failure to select an option in time counts as an incorrect answer and resets your streak combo.</p>
+              </div>
+              <div>
+                <strong>5. Real-Time Multiplayer:</strong>
+                <p style={{ color: 'var(--color-text-muted)', marginTop: '2px' }}>In Internet Mode, rooms are hosted on EMQX secure cloud servers. Anyone anywhere on the internet can join with your 4-digit room code to play together in real-time!</p>
+              </div>
+            </div>
+            <button className="btn-primary" onClick={() => setShowHelpModal(false)} style={{ marginTop: '20px', width: '100%' }}>
+              Close Rules
+            </button>
+          </div>
+        )}
+
+        {/* QUIT GAME CONFIRMATION OVERLAY */}
+        {showQuitConfirm && (
+          <div style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            background: 'rgba(2, 6, 23, 0.95)',
+            zIndex: 1000,
+            borderRadius: '24px',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '40px',
+            textAlign: 'center',
+            backdropFilter: 'blur(10px)',
+            animation: 'slideIn 0.3s'
+          }}>
+            <div style={{ fontSize: '3rem', color: 'var(--color-hard)', marginBottom: '15px' }}>🚨</div>
+            <h2 style={{ color: 'white', fontWeight: 800, fontSize: '1.4rem', marginBottom: '10px' }}>
+              ABORT ACTIVE QUIZ?
+            </h2>
+            <p style={{ color: 'var(--color-text-muted)', fontSize: '0.9rem', marginBottom: '25px', maxWidth: '340px' }}>
+              Are you sure you want to quit the game? Your current score and progress in this round will be lost.
+            </p>
+            <div style={{ display: 'flex', gap: '12px', width: '100%' }}>
+              <button className="btn-secondary" onClick={() => setShowQuitConfirm(false)} style={{ flexGrow: 1 }}>
+                Resume Play
+              </button>
+              <button className="btn-primary" onClick={() => {
+                setShowQuitConfirm(false);
+                if (questionTimerRef.current) clearInterval(questionTimerRef.current);
+                setGameState('dashboard');
+                if (isMultiplayer) {
+                  sendSocketOrBroadcast({
+                    type: 'PLAYER_LEAVE',
+                    sender: username
+                  });
+                }
+              }} style={{ flexGrow: 1, background: 'linear-gradient(135deg, #ef4444 0%, #dc2626 100%)', boxShadow: '0 4px 14px rgba(239, 68, 68, 0.4)' }}>
+                Quit &amp; Exit
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* RESET RECORDS CONFIRMATION OVERLAY */}
+        {showResetConfirm && (
+          <div style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            background: 'rgba(2, 6, 23, 0.95)',
+            zIndex: 1000,
+            borderRadius: '24px',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '40px',
+            textAlign: 'center',
+            backdropFilter: 'blur(10px)',
+            animation: 'slideIn 0.3s'
+          }}>
+            <div style={{ fontSize: '3rem', color: 'var(--color-medium)', marginBottom: '15px' }}>🗑️</div>
+            <h2 style={{ color: 'white', fontWeight: 800, fontSize: '1.4rem', marginBottom: '10px' }}>
+              CLEAR TERMINAL HISTORY?
+            </h2>
+            <p style={{ color: 'var(--color-text-muted)', fontSize: '0.9rem', marginBottom: '25px', maxWidth: '340px' }}>
+              This will permanently delete all your past quiz deployment records. This action cannot be undone.
+            </p>
+            <div style={{ display: 'flex', gap: '12px', width: '100%' }}>
+              <button className="btn-secondary" onClick={() => setShowResetConfirm(false)} style={{ flexGrow: 1 }}>
+                Cancel
+              </button>
+              <button className="btn-primary" onClick={() => {
+                setShowResetConfirm(false);
+                setHistory([]);
+                localStorage.removeItem('quiz_history');
+              }} style={{ flexGrow: 1, background: 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)', boxShadow: '0 4px 14px rgba(245, 158, 11, 0.4)' }}>
+                Clear Records
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* CHEAT PENALTY WARNING MODAL OVERLAY */}
         {showCheatWarning && (
@@ -1138,6 +1361,11 @@ export default function App() {
                 Enter Arena Gateway
               </button>
             </div>
+            <div style={{ textAlign: 'center', marginTop: '12px' }}>
+              <button type="button" onClick={() => setShowHelpModal(true)} className="btn-secondary" style={{ width: '100%', padding: '10px', fontSize: '0.85rem' }}>
+                ❓ How to Play &amp; Arena Rules
+              </button>
+            </div>
           </form>
         )}
 
@@ -1153,21 +1381,37 @@ export default function App() {
               />
               <div style={{ flexGrow: 1 }}>
                 <h2 style={{ fontSize: '1.25rem', fontWeight: 700 }}>Active Terminal: {username}</h2>
-                <button 
-                  onClick={handleLogout} 
-                  style={{ 
-                    background: 'none', 
-                    border: 'none', 
-                    color: 'var(--color-text-muted)', 
-                    cursor: 'pointer', 
-                    fontSize: '0.8rem', 
-                    textDecoration: 'underline',
-                    padding: 0,
-                    marginTop: '4px'
-                  }}
-                >
-                  Disconnect Terminal
-                </button>
+                <div style={{ display: 'flex', gap: '10px', alignItems: 'center', marginTop: '4px' }}>
+                  <button 
+                    onClick={handleLogout} 
+                    style={{ 
+                      background: 'none', 
+                      border: 'none', 
+                      color: 'var(--color-text-muted)', 
+                      cursor: 'pointer', 
+                      fontSize: '0.8rem', 
+                      textDecoration: 'underline',
+                      padding: 0
+                    }}
+                  >
+                    Disconnect Terminal
+                  </button>
+                  <span style={{ color: 'rgba(255,255,255,0.1)' }}>|</span>
+                  <button 
+                    onClick={() => setShowHelpModal(true)} 
+                    style={{ 
+                      background: 'none', 
+                      border: 'none', 
+                      color: 'var(--color-primary)', 
+                      cursor: 'pointer', 
+                      fontSize: '0.8rem', 
+                      fontWeight: 600,
+                      padding: 0
+                    }}
+                  >
+                    ❓ Help Guide
+                  </button>
+                </div>
               </div>
               <button onClick={handlePlaySolo} className="btn-primary">
                 Solo Deployment
@@ -1262,9 +1506,27 @@ export default function App() {
 
             {/* History Table */}
             <div>
-              <h3 style={{ fontSize: '1rem', fontWeight: 700, marginBottom: '12px', borderBottom: '1px solid rgba(255,255,255,0.05)', paddingBottom: '6px' }}>
-                Past Arena Logs
-              </h3>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px', borderBottom: '1px solid rgba(255,255,255,0.05)', paddingBottom: '6px' }}>
+                <h3 style={{ fontSize: '1rem', fontWeight: 700 }}>
+                  Past Arena Logs
+                </h3>
+                {history.length > 0 && (
+                  <button
+                    onClick={() => setShowResetConfirm(true)}
+                    style={{
+                      background: 'none',
+                      border: 'none',
+                      color: 'var(--color-error)',
+                      cursor: 'pointer',
+                      fontSize: '0.75rem',
+                      fontWeight: 600,
+                      padding: 0
+                    }}
+                  >
+                    🗑️ Clear History
+                  </button>
+                )}
+              </div>
               {history.length === 0 ? (
                 <p style={{ color: 'var(--color-text-muted)', fontSize: '0.9rem', textAlign: 'center', padding: '20px 0' }}>
                   Terminal log empty. Deploy to register quiz runs.
@@ -1507,9 +1769,27 @@ export default function App() {
                 </span>
               )}
 
-              <div style={{ display: 'flex', gap: '20px' }}>
+              <div style={{ display: 'flex', gap: '20px', alignItems: 'center' }}>
                 <div className="game-stat">Score: <span>{isDisqualified ? 0 : score}</span></div>
                 <div className="game-stat">Round: <span>{currentRound}/5</span></div>
+                <button
+                  onClick={() => setShowQuitConfirm(true)}
+                  style={{
+                    background: 'rgba(239, 68, 68, 0.1)',
+                    border: '1px solid rgba(239, 68, 68, 0.3)',
+                    color: 'var(--color-hard)',
+                    borderRadius: '6px',
+                    padding: '4px 8px',
+                    fontSize: '0.7rem',
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                    transition: 'all 0.2s'
+                  }}
+                  onMouseEnter={(e) => { e.target.style.background = 'var(--color-error)'; e.target.style.color = 'black'; }}
+                  onMouseLeave={(e) => { e.target.style.background = 'rgba(239, 68, 68, 0.1)'; e.target.style.color = 'var(--color-hard)'; }}
+                >
+                  🚪 Abort
+                </button>
               </div>
             </div>
 
