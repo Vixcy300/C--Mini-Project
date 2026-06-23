@@ -29,6 +29,36 @@ export const questionsData = {
       options: ["const", "constant", "readonly", "static"],
       correctIndex: 1,
       feedback: "'const' tells the compiler that the value of the variable cannot be modified after initialization."
+    },
+    {
+      text: "What is the purpose of '#pragma once' in C++ header files?",
+      options: ["Allocates static memory", "Prevents double inclusion of header files", "Loads external binary assemblies", "Optimizes template compilation speed"],
+      correctIndex: 2,
+      feedback: "'#pragma once' is a widely supported preprocessor directive designed to cause the current source file to be included only once in a single compilation."
+    },
+    {
+      text: "Which manipulator is used to print boolean values as 'true' or 'false' instead of '1' or '0'?",
+      options: ["std::boolalpha", "std::showbool", "std::setformat", "std::boolean"],
+      correctIndex: 1,
+      feedback: "'std::boolalpha' is an I/O manipulator that formats boolean values as text representation ('true' / 'false')."
+    },
+    {
+      text: "How do you declare a reference variable 'ref' to an integer variable 'x'?",
+      options: ["int* ref = &x;", "int& ref = x;", "int ref = *x;", "int ref = &x;"],
+      correctIndex: 2,
+      feedback: "A reference is declared using the '&' symbol after the type, e.g. 'int& ref = x;'. It acts as an alias to the original variable."
+    },
+    {
+      text: "Which operator is used to access a global variable when a local variable with the same name exists?",
+      options: [":: (scope resolution)", ". (dot operator)", "-> (arrow operator)", "* (dereference)"],
+      correctIndex: 1,
+      feedback: "The scope resolution operator '::' without a class name prefix accesses identifiers in the global namespace scope."
+    },
+    {
+      text: "Which stream is used to print error messages that should bypass standard output buffering?",
+      options: ["std::cout", "std::cin", "std::cerr", "std::clog"],
+      correctIndex: 3,
+      feedback: "'std::cerr' is the standard error stream in C++ and is unbuffered, meaning it displays messages immediately on screen."
     }
   ],
   medium: [
@@ -71,6 +101,46 @@ export const questionsData = {
       ],
       correctIndex: 2,
       feedback: "RAII stands for Resource Acquisition Is Initialization, where resource lifecycle (files, heap memory) is bound to object lifetime."
+    },
+    {
+      text: "In derived classes, in what order are destructors executed during destruction?",
+      options: ["Derived class first, then base class", "Base class first, then derived class", "Both destructors run simultaneously", "Only the base class destructor is run"],
+      correctIndex: 1,
+      feedback: "Destructors are executed in the reverse order of constructors: Derived class destructor runs first, then the Base class destructor."
+    },
+    {
+      text: "What is the correct parameter signature for a copy constructor in a class named 'Widget'?",
+      options: ["Widget(Widget w);", "Widget(Widget* w);", "Widget(const Widget& w);", "Widget(Widget&& w);"],
+      correctIndex: 3,
+      feedback: "A copy constructor takes a reference to const object 'Widget(const Widget&)', avoiding infinite recursion that would happen if passed by value."
+    },
+    {
+      text: "Which operator must be used to free memory allocated with 'int* arr = new int[50];'?",
+      options: ["delete arr;", "free(arr);", "delete[] arr;", "release(arr);"],
+      correctIndex: 3,
+      feedback: "For arrays allocated with 'new[]', you must use 'delete[]' to ensure destructors run for all array elements and the correct array memory block is freed."
+    },
+    {
+      text: "What happens to a local variable declared with the 'static' keyword inside a C++ function?",
+      options: [
+        "It is re-initialized every time the function is executed",
+        "It retains its value between function calls and is initialized once",
+        "It is allocated on the dynamic heap instead of the stack",
+        "It becomes accessible to any external translation unit file"
+      ],
+      correctIndex: 2,
+      feedback: "A static local variable is initialized once when control first passes through its declaration, and retains its value between subsequent function calls."
+    },
+    {
+      text: "What is function overloading in C++?",
+      options: [
+        "Redefining a base class method with the exact same signature in a derived class",
+        "Having multiple functions with the same name but different parameter list signatures",
+        "Binding virtual methods at runtime based on the actual object type",
+        "Declaring a class method with a constexpr constraint inside a structure"
+      ],
+      correctIndex: 2,
+      feedback: "Function overloading allows multiple functions in the same scope to share a name, provided they have different parameter counts or types."
     }
   ],
   hard: [
@@ -123,6 +193,51 @@ export const questionsData = {
       ],
       correctIndex: 2,
       feedback: "Template specialization allows defining a custom behavior/implementation of a template when a specific data type is passed."
+    },
+    {
+      text: "Which syntax is used to declare an rvalue reference to an integer parameter?",
+      options: ["int& x", "int&& x", "int* x", "const int& x"],
+      correctIndex: 2,
+      feedback: "An rvalue reference is declared using double ampersand syntax 'int&&'. It represents a temporary object that can be moved from."
+    },
+    {
+      text: "What is the primary purpose of the 'std::forward' utility function template in C++ templates?",
+      options: [
+        "To cast an expression to a raw pointer type safely",
+        "To preserve the value category (lvalue/rvalue) of arguments when forwarding them",
+        "To run template methods in background threads asynchronously",
+        "To convert derived class instances to abstract interfaces"
+      ],
+      correctIndex: 2,
+      feedback: "'std::forward' is used to implement perfect forwarding in templates, casting arguments to their original value category (maintaining lvalue-ness or rvalue-ness)."
+    },
+    {
+      text: "What does the 'explicit' specifier do when applied to a single-parameter constructor?",
+      options: [
+        "Prevents the constructor from being used for implicit type conversions",
+        "Forces the compiler to inline the constructor body at call sites",
+        "Makes the class constructor callable from static methods only",
+        "Requires the class object to be constructed on the stack"
+      ],
+      correctIndex: 1,
+      feedback: "The 'explicit' keyword prevents the compiler from performing implicit conversions or copy-initializations using that constructor."
+    },
+    {
+      text: "What is the prefix syntax used to declare a full template specialization in C++?",
+      options: ["template <class T>", "template <>", "specialize <T>", "template <special>"],
+      correctIndex: 2,
+      feedback: "A full template specialization is introduced by the 'template <>' prefix, indicating all template parameters are specialized for a specific type."
+    },
+    {
+      text: "What is 'object slicing' in C++ inheritance?",
+      options: [
+        "Dividing class memory into discrete cache-aligned bytes",
+        "Passing a derived class object by value to a base class parameter, losing derived-specific data",
+        "Splitting a structure into multiple independent templates",
+        "Allocating subclass structures across multiple static arrays"
+      ],
+      correctIndex: 2,
+      feedback: "Object slicing occurs when a derived class object is assigned to or passed as a base class object by value. The derived class parts are 'sliced off' and lost."
     }
   ]
 };

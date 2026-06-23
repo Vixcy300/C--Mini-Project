@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { questionsData } from './questions';
 import confetti from 'canvas-confetti';
-import Paho from 'paho-mqtt';
 
 // dicebear avatars seeds
 const AVATAR_SEEDS = ['Cplusplus', 'Compiler', 'Algorithm', 'Pointer', 'Recursion', 'Matrix', 'Binary', 'Lambda'];
@@ -76,12 +75,29 @@ export default function App() {
   const [showQuitConfirm, setShowQuitConfirm] = useState(false);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
 
+  // Admin Portal states
+  const [showAdminPortal, setShowAdminPortal] = useState(false);
+  const [adminTab, setAdminTab] = useState('sandbox'); // 'sandbox' | 'question' | 'logs'
+  const [activeQuestions, setActiveQuestions] = useState(questionsData);
+  
+  // Custom Question Form states
+  const [newQText, setNewQText] = useState('');
+  const [newQOptA, setNewQOptA] = useState('');
+  const [newQOptB, setNewQOptB] = useState('');
+  const [newQOptC, setNewQOptC] = useState('');
+  const [newQOptD, setNewQOptD] = useState('');
+  const [newQCorrect, setNewQCorrect] = useState(1);
+  const [newQDiff, setNewQDiff] = useState('easy');
+  const [newQFeedback, setNewQFeedback] = useState('');
+
+  // Sandbox controls states
+  const [adminScoreInput, setAdminScoreInput] = useState('');
+
   // Refs
   const socketRef = useRef(null);
   const broadcastChannelRef = useRef(null);
   const aiTimersRef = useRef([]);
   const questionTimerRef = useRef(null);
-  const mqttClientRef = useRef(null);
 
   // State refs for event handlers to access current values
   const stateRef = useRef({
@@ -272,85 +288,17 @@ export default function App() {
 
     setConnectionStatus('Connecting...');
 
-    if (connectionMode === 'internet') {
-      // Connect to the public secure EMQX WSS Broker (zero configuration, works over HTTPS)
-      const clientId = `quiz-${roomCode}-${Math.random().toString(36).substring(2, 9)}`;
-      const client = new Paho.Client('broker.emqx.io', 8084, '/mqtt', clientId);
-      mqttClientRef.current = client;
+    if (connectionMode === 'internet' || connectionMode === 'local') {
+      const wsUrl = connectionMode === 'internet'
+        ? `wss://demo.piesocket.com/v3/${roomCode}?api_key=VCXCEuvhGcBDP7XhiJJUDvR1e1D3eiVjgZ9VRiaV&notify_self=0`
+        : `ws://localhost:8080`;
 
-      client.onConnectionLost = (responseObject) => {
-        if (responseObject.errorCode !== 0) {
-          console.warn('[MQTT CONNECTION LOST]', responseObject.errorMessage);
-          setConnectionStatus('Disconnected');
-          setConnectionMode('fallback');
-        }
-      };
-
-      client.onMessageArrived = (message) => {
-        try {
-          const data = JSON.parse(message.payloadString);
-          if (data.code !== roomCode) return;
-          if (data.sender === username) return; // Prevent loop back to self
-          handleIncomingMessage(data);
-        } catch (err) {
-          console.warn('Error parsing incoming MQTT payload:', err);
-        }
-      };
-
-      client.connect({
-        useSSL: true,
-        timeout: 10,
-        keepAliveInterval: 60,
-        cleanSession: true,
-        onSuccess: () => {
-          setConnectionStatus('Connected (Internet)');
-          client.subscribe(`quiz/room/${roomCode}`);
-
-          // Broadcast Join Lobby immediately
-          const joinMsg = {
-            code: roomCode,
-            type: 'JOIN_LOBBY',
-            sender: username,
-            payload: {
-              username,
-              avatar: selectedAvatar,
-              score: 0,
-              streak: 0,
-              difficulty: 'easy',
-              round: 1,
-              cheatCount: 0,
-              isDisqualified: false,
-              status: 'ready'
-            }
-          };
-          const pahoMsg = new Paho.Message(JSON.stringify(joinMsg));
-          pahoMsg.destinationName = `quiz/room/${roomCode}`;
-          client.send(pahoMsg);
-        },
-        onFailure: (err) => {
-          console.error('[MQTT CONNECTION FAILED]', err);
-          setConnectionStatus('Disconnected');
-          setConnectionMode('fallback');
-        }
-      });
-
-      return () => {
-        try {
-          if (client && client.isConnected()) {
-            client.disconnect();
-          }
-        } catch (e) {}
-      };
-    }
-
-    if (connectionMode === 'local') {
-      const wsUrl = `ws://localhost:8080`;
       try {
         const ws = new WebSocket(wsUrl);
         socketRef.current = ws;
 
         ws.onopen = () => {
-          setConnectionStatus('Connected (Local Host)');
+          setConnectionStatus(connectionMode === 'internet' ? 'Connected (Internet)' : 'Connected (Local Host)');
           ws.send(JSON.stringify({
             code: roomCode,
             type: 'JOIN_LOBBY',
@@ -372,6 +320,7 @@ export default function App() {
         ws.onmessage = (event) => {
           try {
             const data = JSON.parse(event.data);
+            if (data.sender === username) return; // Prevent loop back to self
             handleIncomingMessage(data);
           } catch (err) {
             console.warn('Error parsing incoming WS message:', err);
@@ -384,11 +333,19 @@ export default function App() {
 
         ws.onclose = () => {
           setConnectionStatus('Disconnected');
-          setConnectionMode('internet');
+          if (connectionMode === 'local') {
+            setConnectionMode('internet');
+          } else {
+            setConnectionMode('fallback');
+          }
         };
       } catch (e) {
         console.warn('Local WS setup failed, falling back to Internet...', e);
-        setConnectionMode('internet');
+        if (connectionMode === 'local') {
+          setConnectionMode('internet');
+        } else {
+          setConnectionMode('fallback');
+        }
       }
 
       return () => {
@@ -432,19 +389,13 @@ export default function App() {
     }
   }, [isMultiplayer, roomCode, connectionMode, username, selectedAvatar]);
 
-  // Unified Sending Interface (decides whether to send via WS, Paho MQTT, or BroadcastChannel)
+  // Unified Sending Interface (decides whether to send via WS or BroadcastChannel)
   const sendSocketOrBroadcast = (messageObj) => {
     const fullMsg = { ...messageObj, code: roomCode };
 
     if (connectionMode === 'fallback') {
       if (broadcastChannelRef.current) {
         broadcastChannelRef.current.postMessage(fullMsg);
-      }
-    } else if (connectionMode === 'internet') {
-      if (mqttClientRef.current && mqttClientRef.current.isConnected()) {
-        const pahoMsg = new Paho.Message(JSON.stringify(fullMsg));
-        pahoMsg.destinationName = `quiz/room/${roomCode}`;
-        mqttClientRef.current.send(pahoMsg);
       }
     } else {
       if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
@@ -586,46 +537,46 @@ export default function App() {
     });
   };
 
+  const triggerCheatViolation = (reason) => {
+    if (isDisqualified) return;
+
+    playSoundEffect('wrong');
+    const nextCheatCount = stateRef.current.cheatCount + 1;
+    setCheatCount(nextCheatCount);
+    setCheatReason(reason);
+
+    if (nextCheatCount >= 3) {
+      playSoundEffect('dq');
+      setIsDisqualified(true);
+      setScore(0);
+      setStreak(0);
+      setEarnedPoints(0);
+      setHasAnswered(true);
+      setSelectedAnswer(null);
+      
+      broadcastStateUpdate({
+        score: 0,
+        streak: 0,
+        cheatCount: nextCheatCount,
+        isDisqualified: true
+      });
+      logCheatAlert(`[ANTI-CHEAT] You were DISQUALIFIED: ${reason}`);
+    } else {
+      const penalty = antiCheatPenalties;
+      setScore(prev => Math.max(0, prev - penalty));
+      
+      broadcastStateUpdate({
+        score: Math.max(0, stateRef.current.score - penalty),
+        cheatCount: nextCheatCount
+      });
+      setShowCheatWarning(true);
+      logCheatAlert(`[ANTI-CHEAT] Infraction detected: ${reason} (Warning ${nextCheatCount}/3)`);
+    }
+  };
+
   // Anti-Cheat Detectors
   useEffect(() => {
     if (gameState !== 'playing' || !antiCheatEnabled || isDisqualified) return;
-
-    const triggerCheatViolation = (reason) => {
-      if (isDisqualified) return;
-
-      playSoundEffect('wrong');
-      const nextCheatCount = stateRef.current.cheatCount + 1;
-      setCheatCount(nextCheatCount);
-      setCheatReason(reason);
-
-      if (nextCheatCount >= 3) {
-        playSoundEffect('dq');
-        setIsDisqualified(true);
-        setScore(0);
-        setStreak(0);
-        setEarnedPoints(0);
-        setHasAnswered(true);
-        setSelectedAnswer(null);
-        
-        broadcastStateUpdate({
-          score: 0,
-          streak: 0,
-          cheatCount: nextCheatCount,
-          isDisqualified: true
-        });
-        logCheatAlert(`[ANTI-CHEAT] You were DISQUALIFIED: ${reason}`);
-      } else {
-        const penalty = antiCheatPenalties;
-        setScore(prev => Math.max(0, prev - penalty));
-        
-        broadcastStateUpdate({
-          score: Math.max(0, stateRef.current.score - penalty),
-          cheatCount: nextCheatCount
-        });
-        setShowCheatWarning(true);
-        logCheatAlert(`[ANTI-CHEAT] Infraction detected: ${reason} (Warning ${nextCheatCount}/3)`);
-      }
-    };
 
     // Rule 1: Tab Switching / Hiding Page
     const onVisibilityChange = () => {
@@ -839,14 +790,79 @@ export default function App() {
   };
 
   const selectQuestion = (level, usedSet) => {
-    const pool = questionsData[level].filter(q => !usedSet.has(q.text));
-    const activePool = pool.length > 0 ? pool : questionsData[level];
+    const pool = activeQuestions[level].filter(q => !usedSet.has(q.text));
+    const activePool = pool.length > 0 ? pool : activeQuestions[level];
     const randomIndex = Math.floor(Math.random() * activePool.length);
     const selected = activePool[randomIndex];
     
     usedSet.add(selected.text);
     setUsedQuestionTexts(new Set(usedSet));
     return selected;
+  };
+
+  // Admin Portal Event Handlers
+  const handleAddAdminBot = () => {
+    const currentBotNames = roomPlayers.map(p => p.username);
+    const availableBot = AI_PLAYERS_POOL.find(bot => !currentBotNames.includes(bot.username));
+    
+    if (availableBot) {
+      const newBot = {
+        ...availableBot,
+        score: 0,
+        streak: 0,
+        difficulty: 'easy',
+        round: gameState === 'playing' ? currentRound : 1,
+        cheatCount: 0,
+        isDisqualified: false
+      };
+      setRoomPlayers(prev => [...prev, newBot]);
+      logCheatAlert(`[ADMIN] Spawned AI Bot: ${availableBot.username}`);
+      
+      if (gameState === 'playing') {
+        scheduleNextAiTurn(newBot, currentRound);
+      }
+    } else {
+      alert("All AI Bots are already in the room!");
+    }
+  };
+
+  const handleAdminClearPlayers = () => {
+    setRoomPlayers([]);
+    logCheatAlert('[ADMIN] Cleared all room players');
+  };
+
+  const handleInjectQuestion = () => {
+    if (!newQText || !newQOptA || !newQOptB || !newQOptC || !newQOptD || !newQFeedback) {
+      alert('Please fill out all custom question fields!');
+      return;
+    }
+    
+    setActiveQuestions(prev => {
+      const updated = { ...prev };
+      updated[newQDiff] = [
+        ...updated[newQDiff],
+        {
+          text: newQText,
+          options: [newQOptA, newQOptB, newQOptC, newQOptD],
+          correctIndex: newQCorrect,
+          feedback: newQFeedback
+        }
+      ];
+      return updated;
+    });
+
+    logCheatAlert(`[ADMIN] Injected custom ${newQDiff.toUpperCase()} question: "${newQText.slice(0, 20)}..."`);
+    alert(`Successfully injected custom question into the active ${newQDiff.toUpperCase()} pool!`);
+
+    // Reset Form fields
+    setNewQText('');
+    setNewQOptA('');
+    setNewQOptB('');
+    setNewQOptC('');
+    setNewQOptD('');
+    setNewQFeedback('');
+    setNewQCorrect(1);
+    setNewQDiff('easy');
   };
 
   // Simulated bots
@@ -1083,10 +1099,19 @@ export default function App() {
         
         {/* HEADER TOOLBAR (Themes and Sounds) */}
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px', borderBottom: '1px solid rgba(255,255,255,0.05)', paddingBottom: '10px' }}>
-          {/* Audio toggle */}
-          <button onClick={handleSoundToggle} className="btn-secondary" style={{ padding: '6px 12px', fontSize: '0.75rem', display: 'flex', alignItems: 'center', gap: '6px' }}>
-            {soundEnabled ? '🔊 Sound On' : '🔇 Muted'}
-          </button>
+          <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+            {/* Audio toggle */}
+            <button onClick={handleSoundToggle} className="btn-secondary" style={{ padding: '6px 12px', fontSize: '0.75rem', display: 'flex', alignItems: 'center', gap: '6px' }}>
+              {soundEnabled ? '🔊 Sound On' : '🔇 Muted'}
+            </button>
+            <button 
+              onClick={() => { setShowAdminPortal(true); setAdminTab('sandbox'); }} 
+              className="btn-secondary" 
+              style={{ padding: '6px 12px', fontSize: '0.75rem', display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--color-primary)', borderColor: 'rgba(99, 102, 241, 0.3)', background: 'rgba(99, 102, 241, 0.05)' }}
+            >
+              ⚙️ Admin Portal
+            </button>
+          </div>
           
           {/* Visual Theme Selector */}
           <div style={{ display: 'flex', gap: '6px' }}>
@@ -1271,6 +1296,312 @@ export default function App() {
                 Clear Records
               </button>
             </div>
+          </div>
+        )}
+
+        {/* ADMIN PORTAL / DEVELOPER OVERLAY */}
+        {showAdminPortal && (
+          <div style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            background: 'rgba(2, 6, 23, 0.98)',
+            zIndex: 1010,
+            borderRadius: '24px',
+            display: 'flex',
+            flexDirection: 'column',
+            padding: '24px',
+            backdropFilter: 'blur(16px)',
+            animation: 'slideIn 0.3s',
+            overflowY: 'auto'
+          }}>
+            {/* Admin Header */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', borderBottom: '1px solid rgba(255,255,255,0.1)', paddingBottom: '10px' }}>
+              <h2 style={{ color: 'var(--color-primary)', fontWeight: 800, fontSize: '1.25rem', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                ⚙️ DEVELOPER ADMIN GATEWAY
+              </h2>
+              <button 
+                onClick={() => setShowAdminPortal(false)} 
+                className="btn-secondary" 
+                style={{ padding: '4px 10px', fontSize: '0.75rem', borderColor: 'rgba(239, 68, 68, 0.3)', color: 'var(--color-hard)' }}
+              >
+                Close Gateway
+              </button>
+            </div>
+
+            {/* Admin Tabs */}
+            <div style={{ display: 'flex', gap: '8px', marginBottom: '16px' }}>
+              {[
+                { id: 'sandbox', label: '🛠️ Sandbox' },
+                { id: 'question', label: '➕ Add Question' },
+                { id: 'logs', label: '📋 Telemetry' }
+              ].map(tab => (
+                <button
+                  key={tab.id}
+                  onClick={() => setAdminTab(tab.id)}
+                  style={{
+                    flexGrow: 1,
+                    padding: '8px',
+                    fontSize: '0.8rem',
+                    borderRadius: '8px',
+                    border: '1px solid',
+                    borderColor: adminTab === tab.id ? 'var(--color-primary)' : 'rgba(255,255,255,0.05)',
+                    background: adminTab === tab.id ? 'rgba(99, 102, 241, 0.15)' : 'rgba(255,255,255,0.02)',
+                    color: adminTab === tab.id ? 'white' : 'var(--color-text-muted)',
+                    cursor: 'pointer',
+                    fontWeight: 600,
+                    transition: 'all 0.2s'
+                  }}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+
+            {/* TAB CONTENT: SANDBOX CONTROLS */}
+            {adminTab === 'sandbox' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '14px', fontSize: '0.85rem' }}>
+                <div style={{ background: 'rgba(255,255,255,0.02)', padding: '14px', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.05)' }}>
+                  <h4 style={{ color: 'white', marginBottom: '10px', fontWeight: 700 }}>Game State Overrides</h4>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', alignItems: 'center' }}>
+                    {/* Score override */}
+                    <div>
+                      <label className="form-label" style={{ fontSize: '0.7rem' }}>Force Score</label>
+                      <div style={{ display: 'flex', gap: '6px' }}>
+                        <input
+                          type="number"
+                          className="text-input"
+                          placeholder={score.toString()}
+                          value={adminScoreInput}
+                          onChange={(e) => setAdminScoreInput(e.target.value)}
+                          style={{ padding: '6px 10px', fontSize: '0.8rem' }}
+                        />
+                        <button 
+                          onClick={() => {
+                            if (adminScoreInput !== '') {
+                              const newS = Number(adminScoreInput);
+                              setScore(newS);
+                              broadcastStateUpdate({ score: newS });
+                              logCheatAlert(`[ADMIN] Forced Score update: ${newS}`);
+                            }
+                          }}
+                          className="btn-primary" 
+                          style={{ padding: '6px 12px', fontSize: '0.8rem' }}
+                        >
+                          Set
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Difficulty override */}
+                    <div>
+                      <label className="form-label" style={{ fontSize: '0.7rem' }}>Force Difficulty</label>
+                      <select
+                        value={difficulty}
+                        onChange={(e) => {
+                          const newD = e.target.value;
+                          setDifficulty(newD);
+                          if (gameState === 'playing') {
+                            const newQ = selectQuestion(newD, usedQuestionTexts);
+                            setCurrentQuestion(newQ);
+                          }
+                          broadcastStateUpdate({ difficulty: newD });
+                          logCheatAlert(`[ADMIN] Forced Difficulty level: ${newD.toUpperCase()}`);
+                        }}
+                        style={{ width: '100%', background: '#0f172a', border: '1px solid var(--glass-border)', color: 'white', borderRadius: '12px', padding: '10px', fontSize: '0.8rem' }}
+                      >
+                        <option value="easy">Easy</option>
+                        <option value="medium">Medium</option>
+                        <option value="hard">Hard</option>
+                      </select>
+                    </div>
+                  </div>
+                </div>
+
+                <div style={{ background: 'rgba(255,255,255,0.02)', padding: '14px', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.05)' }}>
+                  <h4 style={{ color: 'white', marginBottom: '10px', fontWeight: 700 }}>Infraction & Bot Simulator</h4>
+                  <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                    <button 
+                      onClick={() => triggerCheatViolation('Manual Admin Visibility Override Infraction')} 
+                      className="btn-secondary" 
+                      style={{ padding: '6px 12px', fontSize: '0.75rem', background: 'rgba(239, 68, 68, 0.1)', color: 'var(--color-hard)', borderColor: 'rgba(239, 68, 68, 0.2)' }}
+                    >
+                      💥 Trigger Cheat infraction
+                    </button>
+                    <button 
+                      onClick={() => {
+                        setIsDisqualified(true);
+                        setScore(0);
+                        setStreak(0);
+                        broadcastStateUpdate({ score: 0, streak: 0, isDisqualified: true, cheatCount: 3 });
+                        logCheatAlert('[ADMIN] Manual Disqualification Triggered');
+                      }} 
+                      className="btn-secondary" 
+                      style={{ padding: '6px 12px', fontSize: '0.75rem', background: 'rgba(239, 68, 68, 0.1)', color: 'var(--color-hard)', borderColor: 'rgba(239, 68, 68, 0.2)' }}
+                    >
+                      🚫 Disqualify Self
+                    </button>
+                    <button 
+                      onClick={handleAddAdminBot} 
+                      className="btn-secondary" 
+                      style={{ padding: '6px 12px', fontSize: '0.75rem', color: 'var(--color-success)', borderColor: 'rgba(16, 185, 129, 0.3)', background: 'rgba(16, 185, 129, 0.05)' }}
+                    >
+                      🤖 Spawn AI Bot
+                    </button>
+                    <button 
+                      onClick={handleAdminClearPlayers} 
+                      className="btn-secondary" 
+                      style={{ padding: '6px 12px', fontSize: '0.75rem', color: 'var(--color-text-muted)' }}
+                    >
+                      🧹 Clear Lobby Players
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* TAB CONTENT: ADD CUSTOM QUESTION */}
+            {adminTab === 'question' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', fontSize: '0.8rem', textAlign: 'left' }}>
+                <div>
+                  <label className="form-label" style={{ fontSize: '0.7rem' }}>Question Text</label>
+                  <input
+                    type="text"
+                    className="text-input"
+                    placeholder="e.g. What is std::move used for?"
+                    value={newQText}
+                    onChange={(e) => setNewQText(e.target.value)}
+                    style={{ padding: '8px 12px', fontSize: '0.8rem' }}
+                  />
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+                  <div>
+                    <label className="form-label" style={{ fontSize: '0.7rem' }}>Choice A</label>
+                    <input
+                      type="text"
+                      className="text-input"
+                      placeholder="Option 1"
+                      value={newQOptA}
+                      onChange={(e) => setNewQOptA(e.target.value)}
+                      style={{ padding: '6px 10px', fontSize: '0.75rem' }}
+                    />
+                  </div>
+                  <div>
+                    <label className="form-label" style={{ fontSize: '0.7rem' }}>Choice B</label>
+                    <input
+                      type="text"
+                      className="text-input"
+                      placeholder="Option 2"
+                      value={newQOptB}
+                      onChange={(e) => setNewQOptB(e.target.value)}
+                      style={{ padding: '6px 10px', fontSize: '0.75rem' }}
+                    />
+                  </div>
+                  <div>
+                    <label className="form-label" style={{ fontSize: '0.7rem' }}>Choice C</label>
+                    <input
+                      type="text"
+                      className="text-input"
+                      placeholder="Option 3"
+                      value={newQOptC}
+                      onChange={(e) => setNewQOptC(e.target.value)}
+                      style={{ padding: '6px 10px', fontSize: '0.75rem' }}
+                    />
+                  </div>
+                  <div>
+                    <label className="form-label" style={{ fontSize: '0.7rem' }}>Choice D</label>
+                    <input
+                      type="text"
+                      className="text-input"
+                      placeholder="Option 4"
+                      value={newQOptD}
+                      onChange={(e) => setNewQOptD(e.target.value)}
+                      style={{ padding: '6px 10px', fontSize: '0.75rem' }}
+                    />
+                  </div>
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+                  <div>
+                    <label className="form-label" style={{ fontSize: '0.7rem' }}>Correct Answer Index</label>
+                    <select
+                      value={newQCorrect}
+                      onChange={(e) => setNewQCorrect(Number(e.target.value))}
+                      style={{ width: '100%', background: '#0f172a', border: '1px solid var(--glass-border)', color: 'white', borderRadius: '12px', padding: '8px', fontSize: '0.8rem' }}
+                    >
+                      <option value={1}>1 (A)</option>
+                      <option value={2}>2 (B)</option>
+                      <option value={3}>3 (C)</option>
+                      <option value={4}>4 (D)</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="form-label" style={{ fontSize: '0.7rem' }}>Difficulty Classification</label>
+                    <select
+                      value={newQDiff}
+                      onChange={(e) => setNewQDiff(e.target.value)}
+                      style={{ width: '100%', background: '#0f172a', border: '1px solid var(--glass-border)', color: 'white', borderRadius: '12px', padding: '8px', fontSize: '0.8rem' }}
+                    >
+                      <option value="easy">Easy</option>
+                      <option value="medium">Medium</option>
+                      <option value="hard">Hard</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="form-label" style={{ fontSize: '0.7rem' }}>Feedback / Solution Explanation</label>
+                  <textarea
+                    className="text-input"
+                    placeholder="Enter diagnostic details..."
+                    value={newQFeedback}
+                    onChange={(e) => setNewQFeedback(e.target.value)}
+                    style={{ padding: '8px 12px', fontSize: '0.75rem', height: '60px', resize: 'none' }}
+                  />
+                </div>
+
+                <button 
+                  onClick={handleInjectQuestion}
+                  className="btn-primary" 
+                  style={{ width: '100%', padding: '10px', marginTop: '5px' }}
+                >
+                  🚀 Inject Custom Question
+                </button>
+              </div>
+            )}
+
+            {/* TAB CONTENT: LOGS & TELEMETRY */}
+            {adminTab === 'logs' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', fontSize: '0.8rem' }}>
+                <div style={{ background: 'rgba(255,255,255,0.02)', padding: '12px', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.05)', textAlign: 'left' }}>
+                  <h4 style={{ color: 'white', marginBottom: '8px', fontWeight: 700 }}>Telemetry Console</h4>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', fontFamily: 'var(--font-mono)', fontSize: '0.7rem', color: 'var(--color-text-muted)' }}>
+                    <div>Connection Mode: <strong style={{ color: 'white' }}>{connectionMode.toUpperCase()}</strong></div>
+                    <div>Socket Status: <strong style={{ color: connectionStatus.includes('Connected') ? 'var(--color-success)' : 'var(--color-error)' }}>{connectionStatus}</strong></div>
+                    <div>Room Channel: <strong style={{ color: 'white' }}>quiz/room/{roomCode || 'None'}</strong></div>
+                    <div>Total Local Question Pool: <strong style={{ color: 'white' }}>{activeQuestions.easy.length + activeQuestions.medium.length + activeQuestions.hard.length} (Easy: {activeQuestions.easy.length}, Med: {activeQuestions.medium.length}, Hard: {activeQuestions.hard.length})</strong></div>
+                  </div>
+                </div>
+
+                <div style={{ background: 'rgba(255,255,255,0.02)', padding: '12px', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.05)', textAlign: 'left' }}>
+                  <h4 style={{ color: 'white', marginBottom: '6px', fontWeight: 700 }}>Live Telemetry Logs</h4>
+                  <div style={{ maxHeight: '110px', overflowY: 'auto', fontFamily: 'var(--font-mono)', fontSize: '0.7rem', display: 'flex', flexDirection: 'column', gap: '4px', paddingRight: '5px' }}>
+                    {cheatLogs.length === 0 ? (
+                      <span style={{ color: 'rgba(255,255,255,0.15)', fontStyle: 'italic' }}>No console logs active.</span>
+                    ) : (
+                      cheatLogs.map((log, i) => (
+                        <div key={i} style={{ color: log.includes('ADMIN') ? 'var(--color-primary)' : 'var(--color-medium)' }}>
+                          {log}
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         )}
 
