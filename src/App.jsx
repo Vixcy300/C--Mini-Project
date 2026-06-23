@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { questionsData } from './questions';
 import confetti from 'canvas-confetti';
+import Paho from 'paho-mqtt';
 
 // dicebear avatars seeds
 const AVATAR_SEEDS = ['Cplusplus', 'Compiler', 'Algorithm', 'Pointer', 'Recursion', 'Matrix', 'Binary', 'Lambda'];
@@ -289,49 +290,18 @@ export default function App() {
     setConnectionStatus('Connecting...');
 
     if (connectionMode === 'internet' || connectionMode === 'local') {
-      const wsUrl = connectionMode === 'internet'
-        ? `wss://demo.piesocket.com/v3/${roomCode}?api_key=VCXCEuvhGcBDP7XhiJJUDvR1e1D3eiVjgZ9VRiaV&notify_self=0`
-        : `ws://localhost:8080`;
-
       try {
-        const ws = new WebSocket(wsUrl);
-        socketRef.current = ws;
+        const clientId = 'client_' + Math.random().toString(16).substr(2, 8);
+        const host = connectionMode === 'internet' ? 'broker.emqx.io' : 'localhost';
+        const port = connectionMode === 'internet' ? 8084 : 8080;
+        const useSSL = connectionMode === 'internet';
+        const path = '/mqtt';
+        
+        const client = new Paho.Client(host, port, path, clientId);
+        socketRef.current = client;
 
-        ws.onopen = () => {
-          setConnectionStatus(connectionMode === 'internet' ? 'Connected (Internet)' : 'Connected (Local Host)');
-          ws.send(JSON.stringify({
-            code: roomCode,
-            type: 'JOIN_LOBBY',
-            sender: username,
-            payload: {
-              username,
-              avatar: selectedAvatar,
-              score: 0,
-              streak: 0,
-              difficulty: 'easy',
-              round: 1,
-              cheatCount: 0,
-              isDisqualified: false,
-              status: 'ready'
-            }
-          }));
-        };
-
-        ws.onmessage = (event) => {
-          try {
-            const data = JSON.parse(event.data);
-            if (data.sender === username) return; // Prevent loop back to self
-            handleIncomingMessage(data);
-          } catch (err) {
-            console.warn('Error parsing incoming WS message:', err);
-          }
-        };
-
-        ws.onerror = (e) => {
-          console.warn('[WS ERROR] Socket encountered error:', e);
-        };
-
-        ws.onclose = () => {
+        client.onConnectionLost = (responseObject) => {
+          console.warn('[MQTT ERROR] Connection lost:', responseObject.errorMessage);
           setConnectionStatus('Disconnected');
           if (connectionMode === 'local') {
             setConnectionMode('internet');
@@ -339,6 +309,53 @@ export default function App() {
             setConnectionMode('fallback');
           }
         };
+
+        client.onMessageArrived = (message) => {
+          try {
+            const data = JSON.parse(message.payloadString);
+            if (data.sender === username) return; // Prevent loop back to self
+            handleIncomingMessage(data);
+          } catch (err) {
+            console.warn('Error parsing incoming MQTT message:', err);
+          }
+        };
+
+        client.connect({
+          useSSL: useSSL,
+          onSuccess: () => {
+            setConnectionStatus(connectionMode === 'internet' ? 'Connected (Internet MQTT)' : 'Connected (Local MQTT)');
+            const topic = `quiz/room/${roomCode}`;
+            client.subscribe(topic);
+
+            const joinMsg = {
+              code: roomCode,
+              type: 'JOIN_LOBBY',
+              sender: username,
+              payload: {
+                username,
+                avatar: selectedAvatar,
+                score: 0,
+                streak: 0,
+                difficulty: 'easy',
+                round: 1,
+                cheatCount: 0,
+                isDisqualified: false,
+                status: 'ready'
+              }
+            };
+            const message = new Paho.Message(JSON.stringify(joinMsg));
+            message.destinationName = topic;
+            client.send(message);
+          },
+          onFailure: (err) => {
+            console.warn('MQTT connection failed:', err);
+            if (connectionMode === 'local') {
+              setConnectionMode('internet');
+            } else {
+              setConnectionMode('fallback');
+            }
+          }
+        });
       } catch (e) {
         console.warn('Local WS setup failed, falling back to Internet...', e);
         if (connectionMode === 'local') {
@@ -349,8 +366,8 @@ export default function App() {
       }
 
       return () => {
-        if (socketRef.current) {
-          socketRef.current.close();
+        if (socketRef.current && socketRef.current.isConnected && socketRef.current.isConnected()) {
+          socketRef.current.disconnect();
         }
       };
     }
@@ -398,8 +415,10 @@ export default function App() {
         broadcastChannelRef.current.postMessage(fullMsg);
       }
     } else {
-      if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
-        socketRef.current.send(JSON.stringify(fullMsg));
+      if (socketRef.current && socketRef.current.isConnected && socketRef.current.isConnected()) {
+        const message = new Paho.Message(JSON.stringify(fullMsg));
+        message.destinationName = `quiz/room/${roomCode}`;
+        socketRef.current.send(message);
       }
     }
   };
