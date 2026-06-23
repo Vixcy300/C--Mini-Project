@@ -1885,7 +1885,7 @@ export default function App() {
             {/* Multiplayer Creation Panel */}
             <div style={{
               background: 'rgba(99, 102, 241, 0.04)',
-              border: '1px solid var(--glass-border)',,
+              border: '1px solid var(--glass-border)',
               borderRadius: '16px',
               padding: '20px',
               marginBottom: '30px',
