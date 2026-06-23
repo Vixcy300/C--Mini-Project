@@ -30,8 +30,13 @@ export default function App() {
   const [history, setHistory] = useState([]);
 
   // Theme & Sound Settings
-  const [activeTheme, setActiveTheme] = useState('synthwave'); // 'synthwave' | 'matrix' | 'dracula'
+  const [activeTheme, setActiveTheme] = useState('light'); // 'light' | 'matrix' | 'dracula'
   const [soundEnabled, setSoundEnabled] = useState(true);
+
+  // Fullscreen Anti-Cheat Gate
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [waitingForFullscreen, setWaitingForFullscreen] = useState(false); // true = showing fullscreen gate screen
+  const [pendingMultiplayer, setPendingMultiplayer] = useState(false); // tracks if pending start is multiplayer
 
   // Multiplayer Connection State
   const [roomCode, setRoomCode] = useState('');
@@ -76,6 +81,10 @@ export default function App() {
   const [showQuitConfirm, setShowQuitConfirm] = useState(false);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
 
+  // Extension / Environment check
+  const [extensionCheckPassed, setExtensionCheckPassed] = useState(true);
+  const [extensionWarning, setExtensionWarning] = useState('');
+
   // Admin Portal states
   const [showAdminPortal, setShowAdminPortal] = useState(false);
   const [adminTab, setAdminTab] = useState('sandbox'); // 'sandbox' | 'question' | 'logs'
@@ -104,19 +113,19 @@ export default function App() {
   const stateRef = useRef({
     score, streak, difficulty, currentRound, cheatCount, isDisqualified, gameState,
     antiCheatEnabled, antiCheatPenalties, ruleTabSwitch, ruleMouseLeave, ruleInspectBlock, ruleSpeedRun,
-    hasAnswered, showQuitConfirm, showHelpModal
+    hasAnswered, showQuitConfirm, showHelpModal, isFullscreen
   });
 
   useEffect(() => {
     stateRef.current = {
       score, streak, difficulty, currentRound, cheatCount, isDisqualified, gameState,
       antiCheatEnabled, antiCheatPenalties, ruleTabSwitch, ruleMouseLeave, ruleInspectBlock, ruleSpeedRun,
-      hasAnswered, showQuitConfirm, showHelpModal
+      hasAnswered, showQuitConfirm, showHelpModal, isFullscreen
     };
   }, [
     score, streak, difficulty, currentRound, cheatCount, isDisqualified, gameState,
     antiCheatEnabled, antiCheatPenalties, ruleTabSwitch, ruleMouseLeave, ruleInspectBlock, ruleSpeedRun,
-    hasAnswered, showQuitConfirm, showHelpModal
+    hasAnswered, showQuitConfirm, showHelpModal, isFullscreen
   ]);
 
   // Load username & stats history from LocalStorage
@@ -600,20 +609,25 @@ export default function App() {
     // Rule 1: Tab Switching / Hiding Page
     const onVisibilityChange = () => {
       if (document.hidden && ruleTabSwitch) {
-        triggerCheatViolation('Tab switch detected');
+        triggerCheatViolation('Tab switch / window hidden detected');
       }
     };
 
-    // Rule 2: Clicking away (blur)
+    // Rule 2: Clicking away (blur) - only if NOT caused by fullscreen exit
     const onWindowBlur = () => {
-      if (ruleInspectBlock) {
-        triggerCheatViolation('Window lost focus (clicked away)');
+      if (ruleInspectBlock && stateRef.current.gameState === 'playing') {
+        // Small delay to avoid firing on fullscreen transitions
+        setTimeout(() => {
+          if (stateRef.current.gameState === 'playing') {
+            triggerCheatViolation('Window lost focus (clicked away or DevTools opened)');
+          }
+        }, 300);
       }
     };
 
     // Rule 3: Mouse leaving window boundary
-    const onMouseLeave = () => {
-      if (ruleMouseLeave) {
+    const onMouseLeave = (e) => {
+      if (ruleMouseLeave && e.relatedTarget === null) {
         triggerCheatViolation('Cursor left browser window boundary');
       }
     };
@@ -622,19 +636,32 @@ export default function App() {
     const onCopyAttempt = (e) => {
       if (ruleInspectBlock) {
         e.preventDefault();
-        triggerCheatViolation('Attempted to copy question text');
+        triggerCheatViolation('Attempted to copy question text (Ctrl+C)');
       }
     };
 
-    // Rule 5: Developer tool key triggers block
+    // Rule 4b: Paste blocker (prevent looking up answers and pasting)
+    const onPasteAttempt = (e) => {
+      if (ruleInspectBlock) {
+        e.preventDefault();
+        triggerCheatViolation('Attempted to paste content during quiz');
+      }
+    };
+
+    // Rule 5: Developer tool key triggers + PrintScreen block
     const onKeyDown = (e) => {
       if (ruleInspectBlock) {
         const isInspectorKey = e.key === 'F12' ||
           (e.ctrlKey && e.shiftKey && (e.key === 'I' || e.key === 'i' || e.key === 'J' || e.key === 'j')) ||
           (e.ctrlKey && (e.key === 'U' || e.key === 'u'));
+        const isPrintScreen = e.key === 'PrintScreen' || e.key === 'F13';
         if (isInspectorKey) {
           e.preventDefault();
-          triggerCheatViolation('DevTools inspect keys blocked');
+          triggerCheatViolation('DevTools inspect key attempt blocked (F12/Ctrl+Shift+I)');
+        }
+        if (isPrintScreen) {
+          e.preventDefault();
+          triggerCheatViolation('Screenshot attempt blocked (PrintScreen)');
         }
       }
     };
@@ -643,7 +670,16 @@ export default function App() {
     const onRightClick = (e) => {
       if (ruleInspectBlock) {
         e.preventDefault();
-        triggerCheatViolation('Right-click block triggered');
+        triggerCheatViolation('Context menu / right-click blocked during quiz');
+      }
+    };
+
+    // Rule 7: Fullscreen exit detection
+    const onFullscreenChange = () => {
+      const isNowFullscreen = !!(document.fullscreenElement || document.webkitFullscreenElement || document.mozFullScreenElement);
+      setIsFullscreen(isNowFullscreen);
+      if (!isNowFullscreen && stateRef.current.gameState === 'playing') {
+        triggerCheatViolation('Exited fullscreen mode during quiz');
       }
     };
 
@@ -651,16 +687,22 @@ export default function App() {
     window.addEventListener('blur', onWindowBlur);
     document.addEventListener('mouseleave', onMouseLeave);
     document.addEventListener('copy', onCopyAttempt);
+    document.addEventListener('paste', onPasteAttempt);
     window.addEventListener('keydown', onKeyDown);
     document.addEventListener('contextmenu', onRightClick);
+    document.addEventListener('fullscreenchange', onFullscreenChange);
+    document.addEventListener('webkitfullscreenchange', onFullscreenChange);
 
     return () => {
       document.removeEventListener('visibilitychange', onVisibilityChange);
       window.removeEventListener('blur', onWindowBlur);
       document.removeEventListener('mouseleave', onMouseLeave);
       document.removeEventListener('copy', onCopyAttempt);
+      document.removeEventListener('paste', onPasteAttempt);
       window.removeEventListener('keydown', onKeyDown);
       document.removeEventListener('contextmenu', onRightClick);
+      document.removeEventListener('fullscreenchange', onFullscreenChange);
+      document.removeEventListener('webkitfullscreenchange', onFullscreenChange);
     };
   }, [gameState, isDisqualified, antiCheatEnabled, ruleTabSwitch, ruleInspectBlock, ruleMouseLeave, antiCheatPenalties]);
 
@@ -720,19 +762,20 @@ export default function App() {
     setCheatLogs([]);
     setGameState('lobby');
 
-    // Bot seed timer if room is lonely
+    // Only add AI bots if NO real human players join after 10 seconds
     const timer = setTimeout(() => {
       setRoomPlayers(prev => {
-        if (prev.filter(p => !p.isAi).length > 0) {
-          return [...prev, { ...AI_PLAYERS_POOL[0], score: 0, streak: 0, difficulty: 'easy', round: 1, cheatCount: 0, isDisqualified: false }];
-        }
+        const humanPlayers = prev.filter(p => !p.isAi);
+        // If real humans joined, don't add any bots
+        if (humanPlayers.length > 0) return prev;
+        // If truly nobody joined, add 2 bots
         return [
           ...prev,
           { ...AI_PLAYERS_POOL[0], score: 0, streak: 0, difficulty: 'easy', round: 1, cheatCount: 0, isDisqualified: false },
           { ...AI_PLAYERS_POOL[1], score: 0, streak: 0, difficulty: 'easy', round: 1, cheatCount: 0, isDisqualified: false }
         ];
       });
-    }, 4500);
+    }, 10000); // 10s wait for real players
     aiTimersRef.current.push(timer);
   };
 
@@ -752,11 +795,72 @@ export default function App() {
     setGameState('lobby');
   };
 
+  // Check for suspicious browser extensions before allowing quiz to start
+  const checkForExtensions = () => {
+    const suspiciousIndicators = [];
+    
+    // Check 1: Common extension-injected DOM elements
+    const extSelectors = [
+      '[data-grammarly-shadow-root]',
+      '#grammarly-extension-container',
+      '[class*="grammarly"]',
+      '[id*="honey"]',
+      '[class*="honey"]',
+      '[id*="dashlane"]',
+      '[class*="lastpass"]',
+      '[id*="lastpass"]',
+      '[data-onepassword-uuid]',
+      '[id*="bitwarden"]',
+      '[class*="quizlet"]',
+      '[id*="chatgpt"]',
+      '.ai-assistant-extension',
+    ];
+    extSelectors.forEach(sel => {
+      if (document.querySelector(sel)) {
+        suspiciousIndicators.push(sel.replace(/[\[\].*]/g, '').replace('data-', '').replace('id*=', '').replace('class*=', ''));
+      }
+    });
+    
+    // Check 2: Unusual global variables injected by extensions
+    const suspiciousGlobals = ['__GRAMMARLY__', '__honey__', '_LASTPASS_', '_metamask_', '__REACT_DEVTOOLS_GLOBAL_HOOK__'];
+    suspiciousGlobals.forEach(g => {
+      if (window[g] !== undefined) {
+        suspiciousIndicators.push(g);
+      }
+    });
+
+    // Check 3: Chrome extension content scripts can add properties
+    if (typeof window.chrome !== 'undefined' && window.chrome.runtime && window.chrome.runtime.id) {
+      // This is fine — browser extension APIs are present but we log it
+      // Don't flag Chrome itself, only suspicious extensions
+    }
+
+    if (suspiciousIndicators.length > 0) {
+      return { passed: false, reason: `Suspicious browser extensions detected: ${suspiciousIndicators.slice(0, 3).join(', ')}. Please disable extensions before starting the quiz.` };
+    }
+    return { passed: true, reason: '' };
+  };
+
   const handlePlaySolo = () => {
     setIsMultiplayer(false);
     setRoomCode('');
     setIsHost(false);
-    startQuizGameplay();
+    // Check for extensions first
+    const extCheck = checkForExtensions();
+    if (!extCheck.passed) {
+      setExtensionCheckPassed(false);
+      setExtensionWarning(extCheck.reason);
+      return;
+    }
+    setExtensionCheckPassed(true);
+    // If anti-cheat is enabled, require fullscreen first
+    if (antiCheatEnabled) {
+      setPendingMultiplayer(false);
+      setWaitingForFullscreen(true);
+      setGameState('fullscreen-gate');
+    } else {
+      startQuizGameplay();
+    }
   };
 
   const handleLeaveLobby = () => {
@@ -769,10 +873,70 @@ export default function App() {
   };
 
   const handleStartGame = () => {
-    sendSocketOrBroadcast({
-      type: 'START_GAME',
-      sender: username
-    });
+    // Check for extensions first
+    const extCheck = checkForExtensions();
+    if (!extCheck.passed) {
+      setExtensionCheckPassed(false);
+      setExtensionWarning(extCheck.reason);
+      return;
+    }
+    setExtensionCheckPassed(true);
+    // If anti-cheat is enabled, require fullscreen before the quiz starts
+    if (antiCheatEnabled) {
+      setPendingMultiplayer(true);
+      setWaitingForFullscreen(true);
+      setGameState('fullscreen-gate');
+    } else {
+      sendSocketOrBroadcast({
+        type: 'START_GAME',
+        sender: username
+      });
+      startQuizGameplay();
+    }
+  };
+
+  // Called when user clicks the fullscreen gate button
+  const handleEnterFullscreen = () => {
+    const el = document.documentElement;
+    if (el.requestFullscreen) {
+      el.requestFullscreen().then(() => {
+        setIsFullscreen(true);
+        setWaitingForFullscreen(false);
+        if (pendingMultiplayer) {
+          sendSocketOrBroadcast({
+            type: 'START_GAME',
+            sender: username
+          });
+        }
+        startQuizGameplay();
+      }).catch(err => {
+        console.warn('Fullscreen request failed:', err);
+        // Still allow on failure (browser might not support it)
+        setWaitingForFullscreen(false);
+        if (pendingMultiplayer) {
+          sendSocketOrBroadcast({
+            type: 'START_GAME',
+            sender: username
+          });
+        }
+        startQuizGameplay();
+      });
+    } else {
+      // Fallback for browsers without fullscreen API
+      setWaitingForFullscreen(false);
+      startQuizGameplay();
+    }
+  };
+
+  // Called when user skips fullscreen (allowed but noted)
+  const handleSkipFullscreen = () => {
+    setWaitingForFullscreen(false);
+    if (pendingMultiplayer) {
+      sendSocketOrBroadcast({
+        type: 'START_GAME',
+        sender: username
+      });
+    }
     startQuizGameplay();
   };
 
@@ -1117,7 +1281,7 @@ export default function App() {
       <div className="glass-card" style={{ flexGrow: 1, userSelect: (antiCheatEnabled && ruleInspectBlock && gameState === 'playing') ? 'none' : 'auto' }}>
         
         {/* HEADER TOOLBAR (Themes and Sounds) */}
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px', borderBottom: '1px solid rgba(255,255,255,0.05)', paddingBottom: '10px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px', borderBottom: '1px solid var(--glass-border)', paddingBottom: '10px' }}>
           <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
             {/* Audio toggle */}
             <button onClick={handleSoundToggle} className="btn-secondary" style={{ padding: '6px 12px', fontSize: '0.75rem', display: 'flex', alignItems: 'center', gap: '6px' }}>
@@ -1126,31 +1290,31 @@ export default function App() {
             <button 
               onClick={() => { setShowAdminPortal(true); setAdminTab('sandbox'); }} 
               className="btn-secondary" 
-              style={{ padding: '6px 12px', fontSize: '0.75rem', display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--color-primary)', borderColor: 'rgba(99, 102, 241, 0.3)', background: 'rgba(99, 102, 241, 0.05)' }}
+              style={{ padding: '6px 12px', fontSize: '0.75rem', display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--color-primary)', borderColor: 'rgba(99, 102, 241, 0.3)', background: 'rgba(99, 102, 241, 0.06)' }}
             >
-              ⚙️ Admin Portal
+              ⚙️ Admin
             </button>
           </div>
           
           {/* Visual Theme Selector */}
           <div style={{ display: 'flex', gap: '6px' }}>
-            {['synthwave', 'matrix', 'dracula'].map((t) => (
+            {[{id:'light',label:'☀️ Light'},{id:'matrix',label:'💚 Matrix'},{id:'dracula',label:'🧛 Dracula'}].map((t) => (
               <button
-                key={t}
-                onClick={() => handleThemeChange(t)}
+                key={t.id}
+                onClick={() => handleThemeChange(t.id)}
                 style={{
-                  padding: '6px 12px',
-                  fontSize: '0.75rem',
+                  padding: '6px 10px',
+                  fontSize: '0.7rem',
                   borderRadius: '8px',
-                  border: activeTheme === t ? '1px solid var(--color-primary)' : '1px solid rgba(255,255,255,0.1)',
-                  background: activeTheme === t ? 'rgba(99, 102, 241, 0.15)' : 'rgba(255, 255, 255, 0.02)',
-                  color: 'white',
+                  border: activeTheme === t.id ? '1.5px solid var(--color-primary)' : '1px solid var(--glass-border)',
+                  background: activeTheme === t.id ? 'rgba(79, 70, 229, 0.12)' : 'transparent',
+                  color: activeTheme === t.id ? 'var(--color-primary)' : 'var(--color-text-muted)',
                   cursor: 'pointer',
-                  textTransform: 'capitalize',
+                  fontWeight: activeTheme === t.id ? 700 : 400,
                   transition: 'all 0.2s'
                 }}
               >
-                {t}
+                {t.label}
               </button>
             ))}
           </div>
@@ -1182,95 +1346,92 @@ export default function App() {
         {/* HELP / HOW TO PLAY MODAL OVERLAY */}
         {showHelpModal && (
           <div style={{
-            position: 'absolute',
-            top: 0,
-            left: 0,
-            right: 0,
-            bottom: 0,
-            background: 'rgba(2, 6, 23, 0.95)',
-            zIndex: 1000,
-            borderRadius: '24px',
-            display: 'flex',
-            flexDirection: 'column',
-            padding: '30px',
-            backdropFilter: 'blur(12px)',
-            animation: 'slideIn 0.3s',
-            overflowY: 'auto'
+            position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
+            background: 'var(--overlay-bg)',
+            zIndex: 1000, borderRadius: '24px',
+            display: 'flex', flexDirection: 'column',
+            padding: '30px', backdropFilter: 'blur(12px)',
+            animation: 'slideIn 0.3s', overflowY: 'auto'
           }}>
             <h2 style={{ color: 'var(--color-primary)', fontWeight: 800, fontSize: '1.4rem', marginBottom: '15px', textAlign: 'center' }}>
-              ❓ HOW TO PLAY &amp; ARENA RULES
+              ❓ HOW TO PLAY & ARENA RULES
             </h2>
             <div style={{ fontSize: '0.85rem', lineHeight: 1.5, display: 'flex', flexDirection: 'column', gap: '14px', flexGrow: 1, textAlign: 'left', paddingRight: '5px' }}>
-              <div>
-                <strong>1. Adaptive Difficulty Engine:</strong>
-                <p style={{ color: 'var(--color-text-muted)', marginTop: '2px' }}>Your starting difficulty is EASY. Answering correctly raises the level (Easy → Medium → Hard). Answering incorrectly lowers the level (Hard → Medium → Easy).</p>
-              </div>
-              <div>
-                <strong>2. Points and Combos:</strong>
-                <p style={{ color: 'var(--color-text-muted)', marginTop: '2px' }}>Base Points: Easy = 10 pts | Medium = 30 pts | Hard = 50 pts. Consecutive correct answers stack a Streak Combo multiplier (+5 pts per streak level added to base points!). Incorrect answers break the streak.</p>
-              </div>
-              <div>
-                <strong>3. Strict Anti-Cheat Protocols:</strong>
-                <p style={{ color: 'var(--color-text-muted)', marginTop: '2px' }}>If active, the system detects tab switching, cursor departures from the viewport, DevTools activations (Inspect or F12), and right-clicks. Each warning deducts points. A 3rd infraction triggers automatic disqualification (score locked to 0).</p>
-              </div>
-              <div>
-                <strong>4. Speed Run Mode:</strong>
-                <p style={{ color: 'var(--color-text-muted)', marginTop: '2px' }}>When enabled, you have exactly 15 seconds per question. Failure to select an option in time counts as an incorrect answer and resets your streak combo.</p>
-              </div>
-              <div>
-                <strong>5. Real-Time Multiplayer:</strong>
-                <p style={{ color: 'var(--color-text-muted)', marginTop: '2px' }}>In Internet Mode, rooms are hosted on EMQX secure cloud servers. Anyone anywhere on the internet can join with your 4-digit room code to play together in real-time!</p>
-              </div>
+              <div><strong style={{ color: 'var(--color-text-main)' }}>1. Adaptive Difficulty Engine:</strong><p style={{ color: 'var(--color-text-muted)', marginTop: '2px' }}>Starting difficulty is EASY. Answering correctly raises the level (Easy → Medium → Hard). Incorrect answers lower it.</p></div>
+              <div><strong style={{ color: 'var(--color-text-main)' }}>2. Points and Combos:</strong><p style={{ color: 'var(--color-text-muted)', marginTop: '2px' }}>Base Points: Easy=10 | Medium=30 | Hard=50. Consecutive correct answers stack a Streak Combo (+5 pts per streak level). Wrong breaks the streak.</p></div>
+              <div><strong style={{ color: 'var(--color-text-main)' }}>3. Anti-Cheat Fullscreen Gate:</strong><p style={{ color: 'var(--color-text-muted)', marginTop: '2px' }}>Quiz only begins after you enter Fullscreen. Exiting fullscreen during quiz triggers an immediate cheat violation. Extensions must be disabled.</p></div>
+              <div><strong style={{ color: 'var(--color-text-main)' }}>4. Cheat Detectors:</strong><p style={{ color: 'var(--color-text-muted)', marginTop: '2px' }}>Tab switching, cursor leaving viewport, DevTools (F12), right-click, copy/paste, and PrintScreen are all monitored. 3 infractions = Disqualification.</p></div>
+              <div><strong style={{ color: 'var(--color-text-main)' }}>5. Speed Run Mode:</strong><p style={{ color: 'var(--color-text-muted)', marginTop: '2px' }}>When enabled, you have 15 seconds per question. Time out = wrong answer + streak reset.</p></div>
+              <div><strong style={{ color: 'var(--color-text-main)' }}>6. Internet Multiplayer:</strong><p style={{ color: 'var(--color-text-muted)', marginTop: '2px' }}>Rooms connect via secure MQTT broker. Share your 4-digit code with anyone worldwide to compete in real-time!</p></div>
             </div>
             <button className="btn-primary" onClick={() => setShowHelpModal(false)} style={{ marginTop: '20px', width: '100%' }}>
-              Close Rules
+              Got It — Close Rules
             </button>
+          </div>
+        )}
+
+        {/* EXTENSION WARNING MODAL */}
+        {!extensionCheckPassed && (
+          <div style={{
+            position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
+            background: 'var(--overlay-bg)',
+            zIndex: 1050, borderRadius: '24px',
+            display: 'flex', flexDirection: 'column',
+            alignItems: 'center', justifyContent: 'center',
+            padding: '40px', textAlign: 'center',
+            backdropFilter: 'blur(12px)', animation: 'slideIn 0.3s'
+          }}>
+            <div style={{ fontSize: '3.5rem', marginBottom: '16px' }}>🚫</div>
+            <h2 style={{ color: 'var(--color-error)', fontWeight: 800, fontSize: '1.5rem', marginBottom: '12px' }}>Extension Detected!</h2>
+            <p style={{ color: 'var(--color-text-muted)', fontSize: '0.9rem', marginBottom: '20px', maxWidth: '380px', lineHeight: 1.6 }}>
+              {extensionWarning}
+            </p>
+            <div style={{ background: 'rgba(220,38,38,0.08)', border: '1px solid rgba(220,38,38,0.25)', borderRadius: '12px', padding: '14px 20px', marginBottom: '24px', fontSize: '0.85rem', color: 'var(--color-text-muted)', textAlign: 'left', maxWidth: '400px' }}>
+              <strong style={{ color: 'var(--color-text-main)', display: 'block', marginBottom: '8px' }}>How to disable extensions:</strong>
+              <ul style={{ paddingLeft: '16px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                <li>Chrome: Menu → More Tools → Extensions → Toggle off</li>
+                <li>Edge: Menu → Extensions → Manage → Toggle off</li>
+                <li>Firefox: Menu → Add-ons → Disable all</li>
+                <li>Or use an Incognito/Private window (Ctrl+Shift+N)</li>
+              </ul>
+            </div>
+            <div style={{ display: 'flex', gap: '12px' }}>
+              <button className="btn-secondary" onClick={() => { const c = checkForExtensions(); setExtensionCheckPassed(c.passed); setExtensionWarning(c.reason); }} style={{ padding: '12px 24px' }}>
+                🔄 Retry Check
+              </button>
+              <button className="btn-primary" onClick={() => { setExtensionCheckPassed(true); setExtensionWarning(''); }} style={{ padding: '12px 24px', background: 'linear-gradient(135deg, #dc2626, #b91c1c)', boxShadow: '0 4px 14px rgba(220,38,38,0.3)' }}>
+                Bypass Warning (Risk)
+              </button>
+            </div>
           </div>
         )}
 
         {/* QUIT GAME CONFIRMATION OVERLAY */}
         {showQuitConfirm && (
           <div style={{
-            position: 'absolute',
-            top: 0,
-            left: 0,
-            right: 0,
-            bottom: 0,
-            background: 'rgba(2, 6, 23, 0.95)',
-            zIndex: 1000,
-            borderRadius: '24px',
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'center',
-            justifyContent: 'center',
-            padding: '40px',
-            textAlign: 'center',
-            backdropFilter: 'blur(10px)',
-            animation: 'slideIn 0.3s'
+            position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
+            background: 'var(--overlay-bg)',
+            zIndex: 1000, borderRadius: '24px',
+            display: 'flex', flexDirection: 'column',
+            alignItems: 'center', justifyContent: 'center',
+            padding: '40px', textAlign: 'center',
+            backdropFilter: 'blur(10px)', animation: 'slideIn 0.3s'
           }}>
-            <div style={{ fontSize: '3rem', color: 'var(--color-hard)', marginBottom: '15px' }}>🚨</div>
-            <h2 style={{ color: 'white', fontWeight: 800, fontSize: '1.4rem', marginBottom: '10px' }}>
-              ABORT ACTIVE QUIZ?
-            </h2>
+            <div style={{ fontSize: '3rem', color: 'var(--color-error)', marginBottom: '15px' }}>🚨</div>
+            <h2 style={{ color: 'var(--color-text-main)', fontWeight: 800, fontSize: '1.4rem', marginBottom: '10px' }}>ABORT ACTIVE QUIZ?</h2>
             <p style={{ color: 'var(--color-text-muted)', fontSize: '0.9rem', marginBottom: '25px', maxWidth: '340px' }}>
-              Are you sure you want to quit the game? Your current score and progress in this round will be lost.
+              Are you sure you want to quit? Your current score and progress will be lost.
             </p>
             <div style={{ display: 'flex', gap: '12px', width: '100%' }}>
-              <button className="btn-secondary" onClick={() => setShowQuitConfirm(false)} style={{ flexGrow: 1 }}>
-                Resume Play
-              </button>
+              <button className="btn-secondary" onClick={() => setShowQuitConfirm(false)} style={{ flexGrow: 1 }}>Resume Play</button>
               <button className="btn-primary" onClick={() => {
                 setShowQuitConfirm(false);
                 if (questionTimerRef.current) clearInterval(questionTimerRef.current);
+                if (document.exitFullscreen && document.fullscreenElement) document.exitFullscreen();
                 setGameState('dashboard');
-                if (isMultiplayer) {
-                  sendSocketOrBroadcast({
-                    type: 'PLAYER_LEAVE',
-                    sender: username
-                  });
-                }
-              }} style={{ flexGrow: 1, background: 'linear-gradient(135deg, #ef4444 0%, #dc2626 100%)', boxShadow: '0 4px 14px rgba(239, 68, 68, 0.4)' }}>
-                Quit &amp; Exit
+                if (isMultiplayer) sendSocketOrBroadcast({ type: 'PLAYER_LEAVE', sender: username });
+              }} style={{ flexGrow: 1, background: 'linear-gradient(135deg, #dc2626 0%, #b91c1c 100%)', boxShadow: '0 4px 14px rgba(220, 38, 38, 0.35)' }}>
+                Quit & Exit
               </button>
             </div>
           </div>
@@ -1279,39 +1440,25 @@ export default function App() {
         {/* RESET RECORDS CONFIRMATION OVERLAY */}
         {showResetConfirm && (
           <div style={{
-            position: 'absolute',
-            top: 0,
-            left: 0,
-            right: 0,
-            bottom: 0,
-            background: 'rgba(2, 6, 23, 0.95)',
-            zIndex: 1000,
-            borderRadius: '24px',
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'center',
-            justifyContent: 'center',
-            padding: '40px',
-            textAlign: 'center',
-            backdropFilter: 'blur(10px)',
-            animation: 'slideIn 0.3s'
+            position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
+            background: 'var(--overlay-bg)',
+            zIndex: 1000, borderRadius: '24px',
+            display: 'flex', flexDirection: 'column',
+            alignItems: 'center', justifyContent: 'center',
+            padding: '40px', textAlign: 'center',
+            backdropFilter: 'blur(10px)', animation: 'slideIn 0.3s'
           }}>
             <div style={{ fontSize: '3rem', color: 'var(--color-medium)', marginBottom: '15px' }}>🗑️</div>
-            <h2 style={{ color: 'white', fontWeight: 800, fontSize: '1.4rem', marginBottom: '10px' }}>
-              CLEAR TERMINAL HISTORY?
-            </h2>
+            <h2 style={{ color: 'var(--color-text-main)', fontWeight: 800, fontSize: '1.4rem', marginBottom: '10px' }}>CLEAR HISTORY?</h2>
             <p style={{ color: 'var(--color-text-muted)', fontSize: '0.9rem', marginBottom: '25px', maxWidth: '340px' }}>
-              This will permanently delete all your past quiz deployment records. This action cannot be undone.
+              This will permanently delete all your past quiz records. This cannot be undone.
             </p>
             <div style={{ display: 'flex', gap: '12px', width: '100%' }}>
-              <button className="btn-secondary" onClick={() => setShowResetConfirm(false)} style={{ flexGrow: 1 }}>
-                Cancel
-              </button>
+              <button className="btn-secondary" onClick={() => setShowResetConfirm(false)} style={{ flexGrow: 1 }}>Cancel</button>
               <button className="btn-primary" onClick={() => {
-                setShowResetConfirm(false);
-                setHistory([]);
+                setShowResetConfirm(false); setHistory([]);
                 localStorage.removeItem('quiz_history');
-              }} style={{ flexGrow: 1, background: 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)', boxShadow: '0 4px 14px rgba(245, 158, 11, 0.4)' }}>
+              }} style={{ flexGrow: 1, background: 'linear-gradient(135deg, #d97706 0%, #b45309 100%)', boxShadow: '0 4px 14px rgba(217, 119, 6, 0.35)' }}>
                 Clear Records
               </button>
             </div>
@@ -1321,32 +1468,20 @@ export default function App() {
         {/* ADMIN PORTAL / DEVELOPER OVERLAY */}
         {showAdminPortal && (
           <div style={{
-            position: 'absolute',
-            top: 0,
-            left: 0,
-            right: 0,
-            bottom: 0,
-            background: 'rgba(2, 6, 23, 0.98)',
-            zIndex: 1010,
-            borderRadius: '24px',
-            display: 'flex',
-            flexDirection: 'column',
-            padding: '24px',
-            backdropFilter: 'blur(16px)',
-            animation: 'slideIn 0.3s',
-            overflowY: 'auto'
+            position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
+            background: 'var(--overlay-bg)',
+            zIndex: 1010, borderRadius: '24px',
+            display: 'flex', flexDirection: 'column',
+            padding: '24px', backdropFilter: 'blur(16px)',
+            animation: 'slideIn 0.3s', overflowY: 'auto'
           }}>
             {/* Admin Header */}
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', borderBottom: '1px solid rgba(255,255,255,0.1)', paddingBottom: '10px' }}>
-              <h2 style={{ color: 'var(--color-primary)', fontWeight: 800, fontSize: '1.25rem', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                ⚙️ DEVELOPER ADMIN GATEWAY
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', borderBottom: '1px solid var(--glass-border)', paddingBottom: '10px' }}>
+              <h2 style={{ color: 'var(--color-primary)', fontWeight: 800, fontSize: '1.2rem', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                ⚙️ ADMIN PORTAL
               </h2>
-              <button 
-                onClick={() => setShowAdminPortal(false)} 
-                className="btn-secondary" 
-                style={{ padding: '4px 10px', fontSize: '0.75rem', borderColor: 'rgba(239, 68, 68, 0.3)', color: 'var(--color-hard)' }}
-              >
-                Close Gateway
+              <button onClick={() => setShowAdminPortal(false)} className="btn-secondary" style={{ padding: '4px 12px', fontSize: '0.75rem' }}>
+                ✕ Close
               </button>
             </div>
 
@@ -1361,16 +1496,12 @@ export default function App() {
                   key={tab.id}
                   onClick={() => setAdminTab(tab.id)}
                   style={{
-                    flexGrow: 1,
-                    padding: '8px',
-                    fontSize: '0.8rem',
-                    borderRadius: '8px',
-                    border: '1px solid',
-                    borderColor: adminTab === tab.id ? 'var(--color-primary)' : 'rgba(255,255,255,0.05)',
-                    background: adminTab === tab.id ? 'rgba(99, 102, 241, 0.15)' : 'rgba(255,255,255,0.02)',
-                    color: adminTab === tab.id ? 'white' : 'var(--color-text-muted)',
-                    cursor: 'pointer',
-                    fontWeight: 600,
+                    flexGrow: 1, padding: '8px', fontSize: '0.8rem',
+                    borderRadius: '8px', border: '1.5px solid',
+                    borderColor: adminTab === tab.id ? 'var(--color-primary)' : 'var(--glass-border)',
+                    background: adminTab === tab.id ? 'rgba(79, 70, 229, 0.12)' : 'transparent',
+                    color: adminTab === tab.id ? 'var(--color-primary)' : 'var(--color-text-muted)',
+                    cursor: 'pointer', fontWeight: adminTab === tab.id ? 700 : 400,
                     transition: 'all 0.2s'
                   }}
                 >
@@ -1382,8 +1513,8 @@ export default function App() {
             {/* TAB CONTENT: SANDBOX CONTROLS */}
             {adminTab === 'sandbox' && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '14px', fontSize: '0.85rem' }}>
-                <div style={{ background: 'rgba(255,255,255,0.02)', padding: '14px', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.05)' }}>
-                  <h4 style={{ color: 'white', marginBottom: '10px', fontWeight: 700 }}>Game State Overrides</h4>
+                <div style={{ background: 'rgba(99,102,241,0.04)', padding: '14px', borderRadius: '12px', border: '1px solid var(--glass-border)' }}>
+                  <h4 style={{ color: 'var(--color-text-main)', marginBottom: '10px', fontWeight: 700 }}>Game State Overrides</h4>
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', alignItems: 'center' }}>
                     {/* Score override */}
                     <div>
@@ -1403,7 +1534,7 @@ export default function App() {
                               const newS = Number(adminScoreInput);
                               setScore(newS);
                               broadcastStateUpdate({ score: newS });
-                              logCheatAlert(`[ADMIN] Forced Score update: ${newS}`);
+                              logCheatAlert(`[ADMIN] Score forced to: ${newS}`);
                             }
                           }}
                           className="btn-primary" 
@@ -1427,9 +1558,10 @@ export default function App() {
                             setCurrentQuestion(newQ);
                           }
                           broadcastStateUpdate({ difficulty: newD });
-                          logCheatAlert(`[ADMIN] Forced Difficulty level: ${newD.toUpperCase()}`);
+                          logCheatAlert(`[ADMIN] Difficulty forced: ${newD.toUpperCase()}`);
                         }}
-                        style={{ width: '100%', background: '#0f172a', border: '1px solid var(--glass-border)', color: 'white', borderRadius: '12px', padding: '10px', fontSize: '0.8rem' }}
+                        className="text-input"
+                        style={{ padding: '8px 12px', fontSize: '0.8rem' }}
                       >
                         <option value="easy">Easy</option>
                         <option value="medium">Medium</option>
@@ -1439,33 +1571,32 @@ export default function App() {
                   </div>
                 </div>
 
-                <div style={{ background: 'rgba(255,255,255,0.02)', padding: '14px', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.05)' }}>
-                  <h4 style={{ color: 'white', marginBottom: '10px', fontWeight: 700 }}>Infraction & Bot Simulator</h4>
+                <div style={{ background: 'rgba(99,102,241,0.04)', padding: '14px', borderRadius: '12px', border: '1px solid var(--glass-border)' }}>
+                  <h4 style={{ color: 'var(--color-text-main)', marginBottom: '10px', fontWeight: 700 }}>Infraction & Bot Simulator</h4>
                   <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
                     <button 
-                      onClick={() => triggerCheatViolation('Manual Admin Visibility Override Infraction')} 
+                      onClick={() => triggerCheatViolation('Admin Manual Infraction Test')} 
                       className="btn-secondary" 
-                      style={{ padding: '6px 12px', fontSize: '0.75rem', background: 'rgba(239, 68, 68, 0.1)', color: 'var(--color-hard)', borderColor: 'rgba(239, 68, 68, 0.2)' }}
+                      style={{ padding: '6px 12px', fontSize: '0.75rem', background: 'rgba(220, 38, 38, 0.08)', color: 'var(--color-error)', borderColor: 'rgba(220, 38, 38, 0.2)' }}
                     >
-                      💥 Trigger Cheat infraction
+                      💥 Trigger Cheat Infraction
                     </button>
                     <button 
                       onClick={() => {
                         setIsDisqualified(true);
-                        setScore(0);
-                        setStreak(0);
+                        setScore(0); setStreak(0);
                         broadcastStateUpdate({ score: 0, streak: 0, isDisqualified: true, cheatCount: 3 });
-                        logCheatAlert('[ADMIN] Manual Disqualification Triggered');
+                        logCheatAlert('[ADMIN] Manual DQ triggered');
                       }} 
                       className="btn-secondary" 
-                      style={{ padding: '6px 12px', fontSize: '0.75rem', background: 'rgba(239, 68, 68, 0.1)', color: 'var(--color-hard)', borderColor: 'rgba(239, 68, 68, 0.2)' }}
+                      style={{ padding: '6px 12px', fontSize: '0.75rem', background: 'rgba(220, 38, 38, 0.08)', color: 'var(--color-error)', borderColor: 'rgba(220, 38, 38, 0.2)' }}
                     >
                       🚫 Disqualify Self
                     </button>
                     <button 
                       onClick={handleAddAdminBot} 
                       className="btn-secondary" 
-                      style={{ padding: '6px 12px', fontSize: '0.75rem', color: 'var(--color-success)', borderColor: 'rgba(16, 185, 129, 0.3)', background: 'rgba(16, 185, 129, 0.05)' }}
+                      style={{ padding: '6px 12px', fontSize: '0.75rem', color: 'var(--color-success)', borderColor: 'rgba(5, 150, 105, 0.3)', background: 'rgba(5, 150, 105, 0.06)' }}
                     >
                       🤖 Spawn AI Bot
                     </button>
@@ -1476,6 +1607,25 @@ export default function App() {
                     >
                       🧹 Clear Lobby Players
                     </button>
+                    <button
+                      onClick={() => { const c = checkForExtensions(); logCheatAlert(`[ADMIN] Extension Check: ${c.passed ? 'CLEAR' : 'DETECTED — ' + c.reason.slice(0, 60)}`); }}
+                      className="btn-secondary"
+                      style={{ padding: '6px 12px', fontSize: '0.75rem', color: 'var(--color-primary)', borderColor: 'rgba(79,70,229,0.25)', background: 'rgba(79,70,229,0.06)' }}
+                    >
+                      🔍 Scan Extensions
+                    </button>
+                  </div>
+                </div>
+
+                <div style={{ background: 'rgba(99,102,241,0.04)', padding: '14px', borderRadius: '12px', border: '1px solid var(--glass-border)' }}>
+                  <h4 style={{ color: 'var(--color-text-main)', marginBottom: '8px', fontWeight: 700 }}>Live Environment Status</h4>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', fontSize: '0.8rem' }}>
+                    <div style={{ color: 'var(--color-text-muted)' }}>Game State: <strong style={{ color: 'var(--color-text-main)', fontFamily: 'var(--font-mono)' }}>{gameState}</strong></div>
+                    <div style={{ color: 'var(--color-text-muted)' }}>Theme: <strong style={{ color: 'var(--color-primary)', fontFamily: 'var(--font-mono)' }}>{activeTheme}</strong></div>
+                    <div style={{ color: 'var(--color-text-muted)' }}>Score: <strong style={{ color: 'var(--color-text-main)', fontFamily: 'var(--font-mono)' }}>{score}</strong></div>
+                    <div style={{ color: 'var(--color-text-muted)' }}>Round: <strong style={{ color: 'var(--color-text-main)', fontFamily: 'var(--font-mono)' }}>{currentRound}/5</strong></div>
+                    <div style={{ color: 'var(--color-text-muted)' }}>Cheat Warnings: <strong style={{ color: cheatCount > 0 ? 'var(--color-error)' : 'var(--color-success)', fontFamily: 'var(--font-mono)' }}>{cheatCount}/3</strong></div>
+                    <div style={{ color: 'var(--color-text-muted)' }}>Fullscreen: <strong style={{ color: isFullscreen ? 'var(--color-success)' : 'var(--color-error)', fontFamily: 'var(--font-mono)' }}>{isFullscreen ? 'Active' : 'No'}</strong></div>
                   </div>
                 </div>
               </div>
@@ -1486,133 +1636,81 @@ export default function App() {
               <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', fontSize: '0.8rem', textAlign: 'left' }}>
                 <div>
                   <label className="form-label" style={{ fontSize: '0.7rem' }}>Question Text</label>
-                  <input
-                    type="text"
-                    className="text-input"
-                    placeholder="e.g. What is std::move used for?"
-                    value={newQText}
-                    onChange={(e) => setNewQText(e.target.value)}
-                    style={{ padding: '8px 12px', fontSize: '0.8rem' }}
-                  />
+                  <input type="text" className="text-input" placeholder="e.g. What does std::move do?" value={newQText} onChange={(e) => setNewQText(e.target.value)} style={{ padding: '8px 12px', fontSize: '0.8rem' }} />
                 </div>
-
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+                  {[
+                    { label: 'Choice A', val: newQOptA, set: setNewQOptA },
+                    { label: 'Choice B', val: newQOptB, set: setNewQOptB },
+                    { label: 'Choice C', val: newQOptC, set: setNewQOptC },
+                    { label: 'Choice D', val: newQOptD, set: setNewQOptD }
+                  ].map(({ label, val, set }) => (
+                    <div key={label}>
+                      <label className="form-label" style={{ fontSize: '0.7rem' }}>{label}</label>
+                      <input type="text" className="text-input" placeholder={label} value={val} onChange={(e) => set(e.target.value)} style={{ padding: '6px 10px', fontSize: '0.75rem' }} />
+                    </div>
+                  ))}
+                </div>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
                   <div>
-                    <label className="form-label" style={{ fontSize: '0.7rem' }}>Choice A</label>
-                    <input
-                      type="text"
-                      className="text-input"
-                      placeholder="Option 1"
-                      value={newQOptA}
-                      onChange={(e) => setNewQOptA(e.target.value)}
-                      style={{ padding: '6px 10px', fontSize: '0.75rem' }}
-                    />
-                  </div>
-                  <div>
-                    <label className="form-label" style={{ fontSize: '0.7rem' }}>Choice B</label>
-                    <input
-                      type="text"
-                      className="text-input"
-                      placeholder="Option 2"
-                      value={newQOptB}
-                      onChange={(e) => setNewQOptB(e.target.value)}
-                      style={{ padding: '6px 10px', fontSize: '0.75rem' }}
-                    />
-                  </div>
-                  <div>
-                    <label className="form-label" style={{ fontSize: '0.7rem' }}>Choice C</label>
-                    <input
-                      type="text"
-                      className="text-input"
-                      placeholder="Option 3"
-                      value={newQOptC}
-                      onChange={(e) => setNewQOptC(e.target.value)}
-                      style={{ padding: '6px 10px', fontSize: '0.75rem' }}
-                    />
-                  </div>
-                  <div>
-                    <label className="form-label" style={{ fontSize: '0.7rem' }}>Choice D</label>
-                    <input
-                      type="text"
-                      className="text-input"
-                      placeholder="Option 4"
-                      value={newQOptD}
-                      onChange={(e) => setNewQOptD(e.target.value)}
-                      style={{ padding: '6px 10px', fontSize: '0.75rem' }}
-                    />
-                  </div>
-                </div>
-
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
-                  <div>
-                    <label className="form-label" style={{ fontSize: '0.7rem' }}>Correct Answer Index</label>
-                    <select
-                      value={newQCorrect}
-                      onChange={(e) => setNewQCorrect(Number(e.target.value))}
-                      style={{ width: '100%', background: '#0f172a', border: '1px solid var(--glass-border)', color: 'white', borderRadius: '12px', padding: '8px', fontSize: '0.8rem' }}
-                    >
-                      <option value={1}>1 (A)</option>
-                      <option value={2}>2 (B)</option>
-                      <option value={3}>3 (C)</option>
-                      <option value={4}>4 (D)</option>
+                    <label className="form-label" style={{ fontSize: '0.7rem' }}>Correct Answer</label>
+                    <select value={newQCorrect} onChange={(e) => setNewQCorrect(Number(e.target.value))} className="text-input" style={{ padding: '8px 12px', fontSize: '0.8rem' }}>
+                      <option value={1}>A (1st option)</option>
+                      <option value={2}>B (2nd option)</option>
+                      <option value={3}>C (3rd option)</option>
+                      <option value={4}>D (4th option)</option>
                     </select>
                   </div>
                   <div>
-                    <label className="form-label" style={{ fontSize: '0.7rem' }}>Difficulty Classification</label>
-                    <select
-                      value={newQDiff}
-                      onChange={(e) => setNewQDiff(e.target.value)}
-                      style={{ width: '100%', background: '#0f172a', border: '1px solid var(--glass-border)', color: 'white', borderRadius: '12px', padding: '8px', fontSize: '0.8rem' }}
-                    >
+                    <label className="form-label" style={{ fontSize: '0.7rem' }}>Difficulty</label>
+                    <select value={newQDiff} onChange={(e) => setNewQDiff(e.target.value)} className="text-input" style={{ padding: '8px 12px', fontSize: '0.8rem' }}>
                       <option value="easy">Easy</option>
                       <option value="medium">Medium</option>
                       <option value="hard">Hard</option>
                     </select>
                   </div>
                 </div>
-
                 <div>
-                  <label className="form-label" style={{ fontSize: '0.7rem' }}>Feedback / Solution Explanation</label>
-                  <textarea
-                    className="text-input"
-                    placeholder="Enter diagnostic details..."
-                    value={newQFeedback}
-                    onChange={(e) => setNewQFeedback(e.target.value)}
-                    style={{ padding: '8px 12px', fontSize: '0.75rem', height: '60px', resize: 'none' }}
-                  />
+                  <label className="form-label" style={{ fontSize: '0.7rem' }}>Explanation / Feedback</label>
+                  <textarea className="text-input" placeholder="Explain why this is correct..." value={newQFeedback} onChange={(e) => setNewQFeedback(e.target.value)} style={{ padding: '8px 12px', fontSize: '0.75rem', height: '60px', resize: 'none' }} />
                 </div>
-
-                <button 
-                  onClick={handleInjectQuestion}
-                  className="btn-primary" 
-                  style={{ width: '100%', padding: '10px', marginTop: '5px' }}
-                >
+                <button onClick={handleInjectQuestion} className="btn-primary" style={{ width: '100%', padding: '10px', marginTop: '5px' }}>
                   🚀 Inject Custom Question
                 </button>
+                <div style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', textAlign: 'center' }}>
+                  Total pool: {activeQuestions.easy.length + activeQuestions.medium.length + activeQuestions.hard.length} questions (Easy: {activeQuestions.easy.length} | Med: {activeQuestions.medium.length} | Hard: {activeQuestions.hard.length})
+                </div>
               </div>
             )}
 
             {/* TAB CONTENT: LOGS & TELEMETRY */}
             {adminTab === 'logs' && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', fontSize: '0.8rem' }}>
-                <div style={{ background: 'rgba(255,255,255,0.02)', padding: '12px', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.05)', textAlign: 'left' }}>
-                  <h4 style={{ color: 'white', marginBottom: '8px', fontWeight: 700 }}>Telemetry Console</h4>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', fontFamily: 'var(--font-mono)', fontSize: '0.7rem', color: 'var(--color-text-muted)' }}>
-                    <div>Connection Mode: <strong style={{ color: 'white' }}>{connectionMode.toUpperCase()}</strong></div>
-                    <div>Socket Status: <strong style={{ color: connectionStatus.includes('Connected') ? 'var(--color-success)' : 'var(--color-error)' }}>{connectionStatus}</strong></div>
-                    <div>Room Channel: <strong style={{ color: 'white' }}>quiz/room/{roomCode || 'None'}</strong></div>
-                    <div>Total Local Question Pool: <strong style={{ color: 'white' }}>{activeQuestions.easy.length + activeQuestions.medium.length + activeQuestions.hard.length} (Easy: {activeQuestions.easy.length}, Med: {activeQuestions.medium.length}, Hard: {activeQuestions.hard.length})</strong></div>
+                <div style={{ background: 'rgba(99,102,241,0.04)', padding: '12px', borderRadius: '12px', border: '1px solid var(--glass-border)', textAlign: 'left' }}>
+                  <h4 style={{ color: 'var(--color-text-main)', marginBottom: '8px', fontWeight: 700 }}>Telemetry Console</h4>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', fontFamily: 'var(--font-mono)', fontSize: '0.7rem' }}>
+                    <div style={{ color: 'var(--color-text-muted)' }}>Connection Mode: <strong style={{ color: 'var(--color-text-main)' }}>{connectionMode.toUpperCase()}</strong></div>
+                    <div style={{ color: 'var(--color-text-muted)' }}>Socket Status: <strong style={{ color: connectionStatus.includes('Connected') ? 'var(--color-success)' : 'var(--color-error)' }}>{connectionStatus}</strong></div>
+                    <div style={{ color: 'var(--color-text-muted)' }}>Room Channel: <strong style={{ color: 'var(--color-text-main)' }}>quiz/room/{roomCode || 'None'}</strong></div>
+                    <div style={{ color: 'var(--color-text-muted)' }}>Multiplayer: <strong style={{ color: isMultiplayer ? 'var(--color-success)' : 'var(--color-text-muted)' }}>{isMultiplayer ? `Active (${roomPlayers.length + 1} players)` : 'Solo'}</strong></div>
+                    <div style={{ color: 'var(--color-text-muted)' }}>Anti-Cheat: <strong style={{ color: antiCheatEnabled ? 'var(--color-success)' : 'var(--color-error)' }}>{antiCheatEnabled ? 'ENABLED' : 'DISABLED'}</strong></div>
+                    <div style={{ color: 'var(--color-text-muted)' }}>Fullscreen: <strong style={{ color: isFullscreen ? 'var(--color-success)' : 'var(--color-error)' }}>{isFullscreen ? 'Active' : 'Inactive'}</strong></div>
+                    <div style={{ color: 'var(--color-text-muted)' }}>Extensions: <strong style={{ color: extensionCheckPassed ? 'var(--color-success)' : 'var(--color-error)' }}>{extensionCheckPassed ? 'Clean' : 'DETECTED'}</strong></div>
                   </div>
                 </div>
-
-                <div style={{ background: 'rgba(255,255,255,0.02)', padding: '12px', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.05)', textAlign: 'left' }}>
-                  <h4 style={{ color: 'white', marginBottom: '6px', fontWeight: 700 }}>Live Telemetry Logs</h4>
-                  <div style={{ maxHeight: '110px', overflowY: 'auto', fontFamily: 'var(--font-mono)', fontSize: '0.7rem', display: 'flex', flexDirection: 'column', gap: '4px', paddingRight: '5px' }}>
+                <div style={{ background: 'rgba(99,102,241,0.04)', padding: '12px', borderRadius: '12px', border: '1px solid var(--glass-border)', textAlign: 'left' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
+                    <h4 style={{ color: 'var(--color-text-main)', fontWeight: 700 }}>Live Security Logs</h4>
+                    {cheatLogs.length > 0 && (
+                      <button onClick={() => setCheatLogs([])} style={{ background: 'none', border: 'none', color: 'var(--color-text-muted)', cursor: 'pointer', fontSize: '0.7rem' }}>🗑 Clear</button>
+                    )}
+                  </div>
+                  <div style={{ maxHeight: '150px', overflowY: 'auto', fontFamily: 'var(--font-mono)', fontSize: '0.7rem', display: 'flex', flexDirection: 'column', gap: '4px', paddingRight: '5px' }}>
                     {cheatLogs.length === 0 ? (
-                      <span style={{ color: 'rgba(255,255,255,0.15)', fontStyle: 'italic' }}>No console logs active.</span>
+                      <span style={{ color: 'var(--color-text-muted)', fontStyle: 'italic' }}>No security events logged.</span>
                     ) : (
                       cheatLogs.map((log, i) => (
-                        <div key={i} style={{ color: log.includes('ADMIN') ? 'var(--color-primary)' : 'var(--color-medium)' }}>
+                        <div key={i} style={{ color: log.includes('ADMIN') ? 'var(--color-primary)' : log.includes('DISQUALIFIED') ? 'var(--color-error)' : 'var(--color-medium)' }}>
                           {log}
                         </div>
                       ))
@@ -1627,50 +1725,66 @@ export default function App() {
         {/* CHEAT PENALTY WARNING MODAL OVERLAY */}
         {showCheatWarning && (
           <div style={{
-            position: 'absolute',
-            top: 0,
-            left: 0,
-            right: 0,
-            bottom: 0,
-            background: 'rgba(2, 6, 23, 0.95)',
-            zIndex: 999,
-            borderRadius: '24px',
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'center',
-            justifyContent: 'center',
-            padding: '40px',
-            textAlign: 'center',
-            backdropFilter: 'blur(10px)',
-            animation: 'slideIn 0.3s'
+            position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
+            background: 'var(--overlay-bg)',
+            zIndex: 999, borderRadius: '24px',
+            display: 'flex', flexDirection: 'column',
+            alignItems: 'center', justifyContent: 'center',
+            padding: '40px', textAlign: 'center',
+            backdropFilter: 'blur(10px)', animation: 'slideIn 0.3s'
           }}>
             <div style={{ fontSize: '3rem', color: 'var(--color-error)', marginBottom: '15px' }}>⚠️</div>
             <h2 style={{ color: 'var(--color-error)', fontWeight: 800, fontSize: '1.5rem', marginBottom: '10px' }}>
-              ARENA PROTOCOL VIOLATION!
+              INTEGRITY VIOLATION DETECTED!
             </h2>
-            <p style={{ fontSize: '1.05rem', marginBottom: '15px', color: 'white' }}>
-              {cheatReason || 'Tab switch, mouse leave, or focus loss detected.'}
+            <p style={{ fontSize: '1rem', marginBottom: '15px', color: 'var(--color-text-main)' }}>
+              {cheatReason || 'A suspicious activity was detected.'}
             </p>
             <div style={{
-              background: 'rgba(239, 68, 68, 0.15)',
+              background: 'rgba(220, 38, 38, 0.1)',
               border: '1px solid var(--color-error)',
-              borderRadius: '12px',
-              padding: '12px 20px',
-              marginBottom: '25px',
-              color: 'var(--color-error)',
-              fontSize: '0.95rem',
-              fontWeight: 600
+              borderRadius: '12px', padding: '12px 20px',
+              marginBottom: '25px', color: 'var(--color-error)',
+              fontSize: '0.95rem', fontWeight: 600
             }}>
-              Score Penalty: -{antiCheatPenalties} Points | Warnings: {cheatCount}/3
+              Score Penalty: -{antiCheatPenalties} Points &nbsp;|&nbsp; Warnings: {cheatCount}/3
             </div>
-            <p style={{ color: 'var(--color-text-muted)', fontSize: '0.82rem', marginBottom: '30px', maxWidth: '380px' }}>
-              System tracks visibility, mouse boundaries, DevTools, key triggers, and right-clicks. Standard rooms enforce a 3rd violation disqualification rule.
+            <p style={{ color: 'var(--color-text-muted)', fontSize: '0.82rem', marginBottom: '30px', maxWidth: '380px', lineHeight: 1.5 }}>
+              System monitors: fullscreen status, tab visibility, mouse boundaries, DevTools keys (F12/Ctrl+Shift+I), right-clicks, copy/paste, and PrintScreen. A 3rd violation results in disqualification.
             </p>
             <button className="btn-primary" onClick={() => setShowCheatWarning(false)}>
-              I Acknowledge (Resume Battle)
+              I Acknowledge — Resume Quiz
             </button>
           </div>
         )}
+
+        {/* FULLSCREEN GATE SCREEN */}
+        {gameState === 'fullscreen-gate' && (
+          <div className="fullscreen-gate">
+            <div className="fullscreen-gate-icon">🔒</div>
+            <h2>Anti-Cheat: Enter Fullscreen First</h2>
+            <p>
+              To ensure quiz integrity, you must enter fullscreen mode before questions are revealed.
+              This prevents cheating by making it harder to switch tabs or look up answers.
+            </p>
+            <ul>
+              <li>✅ Questions hidden until fullscreen confirmed</li>
+              <li>✅ Exiting fullscreen mid-quiz = cheat violation</li>
+              <li>✅ Tab switches, copy/paste, and DevTools blocked</li>
+              <li>✅ PrintScreen and screenshots blocked</li>
+              <li>✅ Browser extension check enforced</li>
+            </ul>
+            <div style={{ display: 'flex', gap: '12px', marginTop: '8px' }}>
+              <button className="btn-secondary" onClick={handleSkipFullscreen} style={{ padding: '12px 20px', fontSize: '0.9rem' }}>
+                Skip (Reduced Protection)
+              </button>
+              <button className="btn-primary" onClick={handleEnterFullscreen} style={{ padding: '14px 32px', fontSize: '1rem' }}>
+                🖥️ Enter Fullscreen &amp; Start Quiz
+              </button>
+            </div>
+          </div>
+        )}
+
 
         {/* LOGIN SCREEN */}
         {gameState === 'login' && (
@@ -1746,7 +1860,7 @@ export default function App() {
                   >
                     Disconnect Terminal
                   </button>
-                  <span style={{ color: 'rgba(255,255,255,0.1)' }}>|</span>
+                  <span style={{ color: 'var(--glass-border)' }}>|</span>
                   <button 
                     onClick={() => setShowHelpModal(true)} 
                     style={{ 
@@ -1770,8 +1884,8 @@ export default function App() {
 
             {/* Multiplayer Creation Panel */}
             <div style={{
-              background: 'rgba(255, 255, 255, 0.02)',
-              border: '1px solid rgba(255, 255, 255, 0.05)',
+              background: 'rgba(99, 102, 241, 0.04)',
+              border: '1px solid var(--glass-border)',,
               borderRadius: '16px',
               padding: '20px',
               marginBottom: '30px',
@@ -1893,10 +2007,10 @@ export default function App() {
                     </thead>
                     <tbody>
                       {history.map((game, i) => (
-                        <tr key={i} style={{ borderBottom: '1px solid rgba(255,255,255,0.02)' }}>
+                        <tr key={i} style={{ borderBottom: '1px solid var(--glass-border)' }}>
                           <td style={{ padding: '8px 4px', color: 'var(--color-text-muted)' }}>{game.date}</td>
                           <td style={{ padding: '8px 4px', textAlign: 'right', fontWeight: 700, fontFamily: 'var(--font-mono)' }}>{game.score}</td>
-                          <td style={{ padding: '8px 4px', textAlign: 'right', color: game.accuracy > 70 ? 'var(--color-success)' : 'white' }}>{game.accuracy}%</td>
+                          <td style={{ padding: '8px 4px', textAlign: 'right', color: game.accuracy > 70 ? 'var(--color-success)' : 'var(--color-text-main)' }}>{game.accuracy}%</td>
                         </tr>
                       ))}
                     </tbody>
@@ -1927,8 +2041,8 @@ export default function App() {
 
             {/* CUSTOMIZABLE ROOM SETTINGS PANEL */}
             <div style={{
-              background: 'rgba(255, 255, 255, 0.02)',
-              border: '1px solid rgba(255, 255, 255, 0.05)',
+              background: 'rgba(99, 102, 241, 0.04)',
+              border: '1px solid var(--glass-border)',
               borderRadius: '16px',
               padding: '20px',
               marginBottom: '20px'
@@ -1948,7 +2062,7 @@ export default function App() {
                     onChange={(e) => handleHostSettingChange('antiCheatEnabled', e.target.checked)}
                     disabled={!isHost}
                   />
-                  <label htmlFor="antiCheatToggle" style={{ fontWeight: 600, color: 'white' }}>⚠️ Anti-Cheat Active</label>
+                  <label htmlFor="antiCheatToggle" style={{ fontWeight: 600, color: 'var(--color-text-main)' }}>⚠️ Anti-Cheat Active</label>
                 </div>
 
                 {/* Score Penalties select */}
@@ -1958,7 +2072,7 @@ export default function App() {
                     value={antiCheatPenalties}
                     onChange={(e) => handleHostSettingChange('antiCheatPenalties', Number(e.target.value))}
                     disabled={!isHost || !antiCheatEnabled}
-                    style={{ background: '#0f172a', border: '1px solid var(--glass-border)', color: 'white', borderRadius: '4px', padding: '2px 6px' }}
+                    style={{ background: 'var(--color-bg-deep)', border: '1px solid var(--glass-border)', color: 'var(--color-text-main)', borderRadius: '4px', padding: '2px 6px' }}
                   >
                     <option value={10}>-10 Pts</option>
                     <option value={20}>-20 Pts</option>
@@ -2019,8 +2133,8 @@ export default function App() {
 
             {/* COMPETITORS LIST */}
             <div style={{
-              background: 'rgba(255, 255, 255, 0.02)',
-              border: '1px solid rgba(255, 255, 255, 0.05)',
+              background: 'rgba(99, 102, 241, 0.04)',
+              border: '1px solid var(--glass-border)',
               borderRadius: '16px',
               padding: '20px',
               marginBottom: '30px'
@@ -2135,7 +2249,7 @@ export default function App() {
                     cursor: 'pointer',
                     transition: 'all 0.2s'
                   }}
-                  onMouseEnter={(e) => { e.target.style.background = 'var(--color-error)'; e.target.style.color = 'black'; }}
+                  onMouseEnter={(e) => { e.target.style.background = 'var(--color-error)'; e.target.style.color = 'var(--color-bg-deep)'; }}
                   onMouseLeave={(e) => { e.target.style.background = 'rgba(239, 68, 68, 0.1)'; e.target.style.color = 'var(--color-hard)'; }}
                 >
                   🚪 Abort
@@ -2207,7 +2321,7 @@ export default function App() {
                     ) : selectedAnswer === currentQuestion.correctIndex ? (
                       <div className="feedback-title success">
                         <span>✓ Correct!</span>
-                        <span style={{ color: 'white', fontSize: '0.8rem', fontWeight: 'normal' }}>
+                        <span style={{ color: 'var(--color-text-main)', fontSize: '0.8rem', fontWeight: 'normal' }}>
                           (+{earnedPoints} points)
                         </span>
                       </div>
@@ -2254,7 +2368,7 @@ export default function App() {
 
             {/* Score details */}
             <div className="results-score-circle" style={{ borderColor: isDisqualified ? 'var(--color-error)' : 'rgba(99, 102, 241, 0.3)', boxShadow: isDisqualified ? '0 0 20px rgba(239,68,68,0.3)' : '0 0 30px rgba(99, 102, 241, 0.2)' }}>
-              <div className="results-score-number" style={{ color: isDisqualified ? 'var(--color-error)' : 'white' }}>
+              <div className="results-score-number" style={{ color: isDisqualified ? 'var(--color-error)' : 'var(--color-text-main)' }}>
                 {isDisqualified ? 0 : score}
               </div>
               <div className="results-score-label">Final Score</div>
@@ -2290,7 +2404,7 @@ export default function App() {
             {/* Review Logs List */}
             {!isDisqualified && (
               <>
-                <h3 style={{ fontSize: '1rem', fontWeight: 700, borderBottom: '1px solid rgba(255,255,255,0.05)', paddingBottom: '6px' }}>
+                <h3 style={{ fontSize: '1rem', fontWeight: 700, borderBottom: '1px solid var(--glass-border)', paddingBottom: '6px' }}>
                   Diagnostics &amp; Explanations
                 </h3>
                 <div className="review-list">
