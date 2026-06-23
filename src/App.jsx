@@ -267,8 +267,8 @@ export default function App() {
     let wsUrl = '';
 
     if (connectionMode === 'internet') {
-      // Free public PieSocket channel demo broker
-      wsUrl = `wss://ws.piesocket.com/v3/demo?api_key=VCXCE9sm0gZzoQ5gS3CHzzZs5eEdOfTv85zEGVeC&notify_self=0`;
+      // Free public PieSocket channel demo broker routing by roomCode channel
+      wsUrl = `wss://demo.piesocket.com/v3/${roomCode}?api_key=VCXCEuvhGcBDP7XhiJJUDvR1e1D3eiVjgZ9VRiaV&notify_self=0`;
     } else if (connectionMode === 'local') {
       // Local node WS server
       wsUrl = `ws://localhost:8080`;
